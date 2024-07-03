@@ -1,0 +1,976 @@
+---
+title: "irCLIP-RNP dataset from 13 RBPs in HEK293T and HepG2 from three RNP subzones ranging form 60-120kDa, 120-225kDa, and 225-350kDa"
+author: "Luca Ducoli"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document: 
+    latex_engine: xelatex
+    pandoc_args: --listings
+    includes:
+      in_header: preamble.tex
+  html_document:
+    df_print: paged
+---
+
+This is the pipeline used to analyze the irCLIP-RNP TMT datasets for 13 RBPs from three different gel sections ranging from 60-120kDa, 120-225kDa, and 225-350kDa. The experiment was performed in HEK293T and HepG2 cells.
+
+# 1. Prepare the dataset 
+```{r warning=FALSE, message=FALSE}
+#Needed libraries
+library(DEP2)
+library(tidyverse)
+library(ggplot2)
+library(data.table)
+library(pheatmap)
+library(RColorBrewer)
+library(gplots)
+library(hrbrthemes)
+library(pacman)
+library(textshape)
+library(ggExtra)
+library(viridis)
+library(purrr)
+library(hexbin)
+library(DESeq2)
+library(ggpubr)
+library(UpSetR)
+library(dplyr)
+library(Clipper)
+library(factoextra)
+library(paletteer)
+library(corrplot)
+library(psych)
+library(ggpmisc)
+library(gprofiler2)
+library(viridis)
+library(GGally)
+library(igraph)
+library(rstatix)
+library(limma)
+```
+
+```{r warning=FALSE, message=FALSE}
+# Open TMT data that were searched with MaxQuant and processed with Perseus
+ABCF1_data <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/ABCF1_BZ59.txt")
+DDX5_data <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/DDX5_BZ6.txt")
+FUS_data <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/FUS_BZ3.txt")
+hnA2B1_data <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/hnA2B1_BZ55.txt")
+hnC_data <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/hnC_BZ56.txt")
+hnM_data <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/hnM_BZ57.txt")
+hnU_data <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/hnU_BZ58.txt")
+ILF2_data <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/ILF2_BZ1.txt")
+ILF3_data <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/ILF3_BZ2.txt")
+NAT10_data <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/NAT10_BZ60.txt")
+NONO_data <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/NONO_BZ4.txt")
+RBFOX2_data <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/RBFOX2_BZ86.txt")
+SFPQ_data <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/SFPQ_BZ5.txt")
+
+#get the unique gene names and protein IDs
+colnames <- c("name", "ID", "H293T.noUV.R1.L",	"H293T.noUV.R1.HM",	"H293T.UVC.R1.L",	"H293T.UVC.R1.M",	"H293T.UVC.R1.H",	"H293T.UVC.R2.L",	"H293T.UVC.R2.M",
+              "H293T.UVC.R2.H", "HepG2.noUV.R1.L",	"HepG2.noUV.R1.HM",	"HepG2.UVC.R1.L",	"HepG2.UVC.R1.M",	"HepG2.UVC.R1.H",	"HepG2.UVC.R2.L",	
+              "HepG2.UVC.R2.M",	"HepG2.UVC.R2.H")
+data_prep <- function(data) {
+  data$Gene.names <- str_match_all(data$Fasta.headers, "GN=(.*?) PE") %>%  lapply(., function (x) str_c(x[,2],collapse='; ')) %>%  unlist()
+  data$Prot.IDs <- str_match_all(data$Fasta.headers, "(?<=sp\\|)[[:alnum:]]+") %>%  lapply(., function (x) str_c(x[,1],collapse='; ')) %>%  unlist()
+  data$Gene.names %>% duplicated() %>% any() # check for duplicates
+  data <- make_unique(data, "Gene.names", "Prot.IDs", delim = ";")
+  data$name %>% duplicated() %>% any() # must be false
+  
+  data_f <- data[,c(tail(grep("name", colnames(data) ), 1),tail(grep("ID", colnames(data) ), 1),grep("Reporter", colnames(data) ))]
+  data_f$name[data_f$name == "RBFOX1"] <- "RBFOX2"
+  data_f$ID[data_f$ID == "Q9NWB1"] <- "O43251"
+  return(data_f)
+}
+
+#Open TMT data
+ABCF1 <- data_prep(ABCF1_data)
+colnames(ABCF1) <- colnames
+DDX5 <- data_prep(DDX5_data)
+colnames(DDX5) <- colnames
+FUS <- data_prep(FUS_data)
+colnames(FUS) <- colnames
+hnA2B1 <- data_prep(hnA2B1_data)
+hnA2B1 <- hnA2B1[,c(1:3,7,5:6,4,8:18)]
+colnames(hnA2B1) <- colnames
+hnC <- data_prep(hnC_data)
+colnames(hnC) <- colnames
+hnM <- data_prep(hnM_data)
+hnM <- hnM[,c(1:7,10,8,9,11:18)]
+colnames(hnM) <- colnames
+hnU <- data_prep(hnU_data)
+colnames(hnU) <- colnames
+ILF2 <- data_prep(ILF2_data)
+colnames(ILF2) <- colnames
+ILF3 <- data_prep(ILF3_data)
+colnames(ILF3) <- colnames
+NONO <- data_prep(NONO_data)
+colnames(NONO) <- colnames
+NAT10 <- data_prep(NAT10_data)
+NAT10 <- NAT10[,c(1:10,11,16,13,14,12,18,15,17)]
+colnames(NAT10) <- colnames
+RBFOX2 <- data_prep(RBFOX2_data)
+colnames(RBFOX2) <- colnames
+SFPQ <- data_prep(SFPQ_data)
+SFPQ <- SFPQ[,c(1:15,17,16,18)]
+colnames(SFPQ) <- colnames
+SFPQ
+
+#Save intensities
+write.table(ABCF1, file ="~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/ABCF1_TMT_intensities.txt", row.names = FALSE, sep = '\t', quote = FALSE)
+write.table(DDX5, file ="~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/DDX5_TMT_intensities.txt", row.names = FALSE, sep = '\t', quote = FALSE)
+write.table(FUS, file ="~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/FUS_TMT_intensities.txt", row.names = FALSE, sep = '\t', quote = FALSE)
+write.table(hnA2B1, file ="~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/hnA2B1_TMT_intensities.txt", row.names = FALSE, sep = '\t', quote = FALSE)
+write.table(hnC, file ="~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/hnC_TMT_intensities.txt", row.names = FALSE, sep = '\t', quote = FALSE)
+write.table(hnM, file ="~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/hnM_TMT_intensities.txt", row.names = FALSE, sep = '\t', quote = FALSE)
+write.table(hnU, file ="~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/hnU_TMT_intensities.txt", row.names = FALSE, sep = '\t', quote = FALSE)
+write.table(ILF2, file ="~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/ILF2_TMT_intensities.txt", row.names = FALSE, sep = '\t', quote = FALSE)
+write.table(ILF3, file ="~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/ILF3_TMT_intensities.txt", row.names = FALSE, sep = '\t', quote = FALSE)
+write.table(NAT10, file ="~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/NAT10_TMT_intensities.txt", row.names = FALSE, sep = '\t', quote = FALSE)
+write.table(NONO, file ="~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/NONO_TMT_intensities.txt", row.names = FALSE, sep = '\t', quote = FALSE)
+write.table(RBFOX2, file ="~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/RBFOX2_TMT_intensities.txt", row.names = FALSE, sep = '\t', quote = FALSE)
+write.table(SFPQ, file ="~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/SFPQ_TMT_intensities.txt", row.names = FALSE, sep = '\t', quote = FALSE)
+```
+
+# 2. DEP analysis for UVC enriched proteins
+We used the following design to create a SummarizedExperiment.
+```{r warning=FALSE, message=FALSE}
+# Load design matrix
+design <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/0_design.txt")
+design
+```
+
+We determined RDAPs by comparing UVC and no-UV samples. Only proteins with FDR < 0.1 and FC > 1.2 were selected.
+```{r warning=FALSE, message=FALSE}
+#Function to perform DEP analysis
+DEP_analysis_UVC <- function (data) {
+ecols <- c(grep("H293T", colnames(data)), grep("HepG2", colnames(data)) )
+data[,3:18] <- 2^data[,3:18]
+se <- make_se(data, columns = ecols, expdesign = design)
+se <- normalize_vsn(se)
+se_H293T <- se[,se$celltype == "H293T"]
+diff_H293T <- test_diff(se_H293T, type = "control", control = "noUV_H293T", fdr.type = "BH")
+dep_H293T <- add_rejections(diff_H293T, alpha = 0.1, lfc = log2(1.2))
+results_H293T <- get_results(dep_H293T)
+results_H293T$HEK293T_sign <- ifelse((results_H293T$high_cut_H293T_vs_noUV_H293T_significant == "TRUE" |
+                              results_H293T$medium_cut_H293T_vs_noUV_H293T_significant == "TRUE" |
+                              results_H293T$low_cut_H293T_vs_noUV_H293T_significant == "TRUE"), "HEK293T", "none")
+
+se_HepG2 <- se[,se$celltype == "HepG2"]
+diff_HepG2 <- test_diff(se_HepG2, type = "control", control = "noUV_HepG2", fdr.type = "BH")
+dep_HepG2 <- add_rejections(diff_HepG2, alpha = 0.1, lfc = log2(1.2))
+results_HepG2 <- get_results(dep_HepG2)
+results_HepG2$HepG2_sign <- ifelse((results_HepG2$high_cut_HepG2_vs_noUV_HepG2_significant == "TRUE" |
+                              results_HepG2$medium_cut_HepG2_vs_noUV_HepG2_significant == "TRUE" |
+                              results_HepG2$low_cut_HepG2_vs_noUV_HepG2_significant == "TRUE"), "HepG2", "none")
+results <- merge(results_H293T, results_HepG2[,-2], by = "name")
+results$UVC <- ifelse((results$HEK293T_sign == "HEK293T" | results$HepG2_sign == "HepG2") , "UVC", "none")
+
+return(list(se = se, HEK293T_res = results_H293T, HepG2_res = results_HepG2, all = results))
+}
+
+ABCF1_DEP_UVC <- DEP_analysis_UVC(ABCF1)
+DDX5_DEP_UVC <- DEP_analysis_UVC(DDX5)
+FUS_DEP_UVC <- DEP_analysis_UVC(FUS)
+hnA2B1_DEP_UVC <- DEP_analysis_UVC(hnA2B1)
+hnC_DEP_UVC <- DEP_analysis_UVC(hnC)
+hnM_DEP_UVC <- DEP_analysis_UVC(hnM)
+hnU_DEP_UVC <- DEP_analysis_UVC(hnU)
+ILF2_DEP_UVC <- DEP_analysis_UVC(ILF2)
+ILF3_DEP_UVC <- DEP_analysis_UVC(ILF3)
+NAT10_DEP_UVC <- DEP_analysis_UVC(NAT10)
+NONO_DEP_UVC <- DEP_analysis_UVC(NONO)
+RBFOX2_DEP_UVC <- DEP_analysis_UVC(RBFOX2)
+SFPQ_DEP_UVC <- DEP_analysis_UVC(SFPQ)
+```
+
+```{r warning=FALSE, message=FALSE}
+write.table(ABCF1_DEP_UVC$all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/2_UVC_enriched/ABCF1_TMT_DEP_UVC_results.txt", row.names = FALSE, sep = "\t")
+write.table(DDX5_DEP_UVC$all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/2_UVC_enriched/DDX5_TMT_DEP_UVC_results.txt", row.names = FALSE, sep = "\t")
+write.table(FUS_DEP_UVC$all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/2_UVC_enriched/FUS_TMT_DEP_UVC_results.txt", row.names = FALSE, sep = "\t")
+write.table(hnA2B1_DEP_UVC$all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/2_UVC_enriched/hnA2B1_TMT_DEP_UVC_results.txt", row.names = FALSE, sep = "\t")
+write.table(hnC_DEP_UVC$all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/2_UVC_enriched/hnC_TMT_DEP_UVC_results.txt", row.names = FALSE, sep = "\t")
+write.table(hnM_DEP_UVC$all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/2_UVC_enriched/hnM_TMT_DEP_UVC_results.txt", row.names = FALSE, sep = "\t")
+write.table(hnU_DEP_UVC$all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/2_UVC_enriched/hnU_TMT_DEP_UVC_results.txt", row.names = FALSE, sep = "\t")
+write.table(ILF2_DEP_UVC$all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/2_UVC_enriched/ILF2_TMT_DEP_UVC_results.txt", row.names = FALSE, sep = "\t")
+write.table(ILF3_DEP_UVC$all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/2_UVC_enriched/ILF3_TMT_DEP_UVC_results.txt", row.names = FALSE, sep = "\t")
+write.table(NAT10_DEP_UVC$all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/2_UVC_enriched/NAT10_TMT_DEP_UVC_results.txt", row.names = FALSE, sep = "\t")
+write.table(NONO_DEP_UVC$all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/2_UVC_enriched/NONO_TMT_DEP_UVC_results.txt", row.names = FALSE, sep = "\t")
+write.table(RBFOX2_DEP_UVC$all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/2_UVC_enriched/RBFOX2_TMT_DEP_UVC_results.txt", row.names = FALSE, sep = "\t")
+write.table(SFPQ_DEP_UVC$all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/2_UVC_enriched/SFPQ_TMT_DEP_UVC_results.txt", row.names = FALSE, sep = "\t")
+```
+
+#3. Two-factor analysis between cell types and gel sections
+To analyze the cell-type differences, we used the limma package with a two-factor design (cell type and section). 
+```{r message=FALSE, warning=FALSE}
+#Perform DEP analysis using a two-factor model
+extract_results_table <- function(fit) {
+  tests <- colnames(fit$coefficients) %>%
+    set_names(., .)
+  map(tests, \(x) {
+    tibble(gene = rownames(fit$coefficients),
+           logFC = fit$coefficients[,x],
+           s2.post = fit$s2.post,
+           p.value = fit$p.value[,x]) %>%
+      mutate(fdr = p.adjust(p.value, method = 'BH'))
+  })
+}
+
+DEP_analysis <- function (se, rbp, rbp2) {
+se_UVC <- se[,se$crosslinking == "UVC"]
+
+#Get contrasts for each cell line and each normalization
+model_vsn <- model.matrix(~ celltype * section, colData(se_UVC))
+H293T_high_vsn <- colMeans(model_vsn[se_UVC$celltype == "H293T" & se_UVC$section == "high", ])
+H293T_med_vsn <- colMeans(model_vsn[se_UVC$celltype == "H293T" & se_UVC$section == "med", ])
+H293T_low_vsn <- colMeans(model_vsn[se_UVC$celltype == "H293T" & se_UVC$section == "low", ])
+HepG2_high_vsn <- colMeans(model_vsn[se_UVC$celltype == "HepG2" & se_UVC$section == "high", ])
+HepG2_med_vsn <- colMeans(model_vsn[se_UVC$celltype == "HepG2" & se_UVC$section == "med", ])
+HepG2_low_vsn <- colMeans(model_vsn[se_UVC$celltype == "HepG2" & se_UVC$section == "low", ])
+
+#Fit the data
+fit1_norm_vsn = lmFit(assay(se_UVC), design = model.matrix(~ celltype * section, colData(se_UVC)))
+
+#Get contrasts
+contrast_matrix_vsn <- cbind("H293T_high.H293T_low" = H293T_high_vsn - H293T_low_vsn, "H293T_med.H293T_low" = H293T_med_vsn - H293T_low_vsn,
+                             "HepG2_high.HepG2_low" = HepG2_high_vsn - HepG2_low_vsn, "HepG2_med.HepG2_low" = HepG2_med_vsn - HepG2_low_vsn,
+                             "HepG2_high.H293T_high" = HepG2_high_vsn - H293T_high_vsn, "HepG2_med.H293T_med" = HepG2_med_vsn - H293T_med_vsn,
+                             "HepG2_low.H293T_low" = HepG2_low_vsn - H293T_low_vsn)
+
+#Second fit
+fit2_norm_vsn <- contrasts.fit(fit1_norm_vsn, contrasts = contrast_matrix_vsn)
+fit3_norm_vsn <- eBayes(fit2_norm_vsn)
+
+#Get results
+res_norm_vsn <- extract_results_table(fit3_norm_vsn) 
+
+#Interaction analysis
+fit1_norm_int_vsn = lmFit(assay(se_UVC), design = model.matrix(~ celltype * section, colData(se_UVC)))
+fit2_norm_int_vsn <- eBayes(fit1_norm_int_vsn)
+int_norm_vsn <- topTable(fit2_norm_int_vsn, coef = c("celltypeHepG2:sectionlow", "celltypeHepG2:sectionmed"), number = length(rownames(se_UVC))) 
+int_norm_vsn$gene <- rownames(int_norm_vsn)
+
+#Get significance labels
+res_norm_vsn_HL <- merge(res_norm_vsn$H293T_high.H293T_low, res_norm_vsn$HepG2_high.HepG2_low, by="gene")
+res_norm_vsn_HL <- merge( res_norm_vsn_HL,int_norm_vsn,  by = "gene")
+res_norm_vsn_HL$int_sign <- res_norm_vsn_HL$adj.P.Val < 0.1
+
+res_norm_vsn_ML <- merge(res_norm_vsn$H293T_med.H293T_low, res_norm_vsn$HepG2_med.HepG2_low, by="gene")
+res_norm_vsn_ML <- merge( res_norm_vsn_ML,int_norm_vsn,  by = "gene")
+res_norm_vsn_ML$int_sign <- res_norm_vsn_ML$adj.P.Val < 0.1
+
+res_norm_vsn_HL$order_sign <- paste(res_norm_vsn_HL$logFC.x > 0 & res_norm_vsn_HL$fdr.x < 0.05, #293T up
+                                           res_norm_vsn_HL$logFC.y > 0 & res_norm_vsn_HL$fdr.y < 0.05, #HepG2 up
+                                           res_norm_vsn_HL$logFC.x < 0 & res_norm_vsn_HL$fdr.x < 0.05, #293T down
+                                           res_norm_vsn_HL$logFC.y < 0 & res_norm_vsn_HL$fdr.y < 0.05, #HepG2 down
+                                           sep = "_")
+
+res_norm_vsn_ML$order_sign <- paste(res_norm_vsn_ML$logFC.x > 0 & res_norm_vsn_ML$fdr.x < 0.05, #293T up
+                                           res_norm_vsn_ML$logFC.y > 0 & res_norm_vsn_ML$fdr.y < 0.05, #HepG2 up
+                                           res_norm_vsn_ML$logFC.x < 0 & res_norm_vsn_ML$fdr.x < 0.05, #293T down
+                                           res_norm_vsn_ML$logFC.y < 0 & res_norm_vsn_ML$fdr.y < 0.05, #HepG2 down
+                                           sep = "_")
+resHL <- res_norm_vsn_HL
+colnames(resHL)[-1] <- paste("HL", colnames(resHL)[-1], sep="_")
+resML <- res_norm_vsn_ML
+colnames(resML)[-1] <- paste("ML", colnames(resML)[-1], sep="_")
+res_evr <- merge(resHL, resML, by = "gene", all.x = TRUE, all.y = TRUE)
+
+#Keep only UVC proteins that are in both Label-free and TMT experiments
+bulk_HEK293T <- read.delim(paste("/Users/lducoli/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/Bulk_analysis/2_UVC_enriched/", rbp , "_HEK293T_clipper_results.txt", sep = ""), header = TRUE, row.names = 1)
+bulk_HEK293T <- subset(bulk_HEK293T, FDR < 0.1 & logFC > log2(3))
+
+bulk_HepG2 <- read.delim(paste("/Users/lducoli/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/Bulk_analysis/2_UVC_enriched/", rbp , "_HepG2_clipper_results.txt", sep = ""), header = TRUE, row.names = 1)
+bulk_HepG2 <- subset(bulk_HepG2, FDR < 0.1 & logFC > log2(3))
+
+bulk_UVC_gene <- unique(c(rownames(bulk_HepG2), rownames(bulk_HEK293T)))
+TMT_UVC_gene <- get(paste(rbp2, "_DEP_UVC", sep = ""))$all$name[get(paste(rbp2, "_DEP_UVC", sep = ""))$all$UVC == "UVC"]
+
+intersect <- intersect(bulk_UVC_gene, TMT_UVC_gene)
+
+res_norm_vsn_HL <- res_norm_vsn_HL[res_norm_vsn_HL$gene %in%  intersect,]
+res_norm_vsn_ML <- res_norm_vsn_ML[res_norm_vsn_ML$gene %in%  intersect,]
+
+#Scatter plot
+vsn_max_axis <- c(max(c( max(res_norm_vsn_HL$logFC.x, res_norm_vsn_HL$logFC.y),max(res_norm_vsn_ML$logFC.x, res_norm_vsn_ML$logFC.y))))
+vsn_min_axis <- c(max(abs(min(res_norm_vsn_HL$logFC.x, res_norm_vsn_HL$logFC.y)),abs(min(res_norm_vsn_ML$logFC.x, res_norm_vsn_ML$logFC.y))))
+
+colors <- c("FALSE" = "#868686","TRUE" =  "#ff8d2a")
+
+colors2 <- c("FALSE_FALSE_FALSE_FALSE" = "#868686", "FALSE_TRUE_TRUE_FALSE" = "#770003", "TRUE_FALSE_FALSE_TRUE" = "#770003", "FALSE_FALSE_FALSE_TRUE" = "#2256ca" ,"FALSE_FALSE_TRUE_FALSE" = "#2256ca",
+                    "FALSE_FALSE_TRUE_TRUE" = "#2256ca", "FALSE_TRUE_FALSE_FALSE" = "#00a04c", "TRUE_FALSE_FALSE_FALSE" = "#00a04c",
+                    "TRUE_TRUE_FALSE_FALSE" =  "#00a04c")
+
+res_norm_vsn_HL$gel <- "High"
+res_norm_vsn_ML$gel <- "Medium"
+
+res_norm_vsn_all <- rbind(res_norm_vsn_HL, res_norm_vsn_ML)
+
+all.ggplot <- ggplot(data=res_norm_vsn_all, aes(x=logFC.x, y=logFC.y)) + geom_vline(xintercept = 0) + geom_hline(yintercept = 0) +  geom_abline(intercept = 0, linetype=2) + 
+  geom_point(shape=21, size=2, aes(col=int_sign, fill = order_sign)) + #aes(col = int_sign)) +
+  labs(title = paste(rbp, " (", nrow(res_norm_vsn_all)/2, " RDAPs)" , sep = "")  , x = expression("log2FC high vs. low sections in H293T"), y =
+         expression("log2FC high vs. low sections in HepG2")) +
+  scale_color_manual(values = colors) +
+  scale_fill_manual(values = colors2) +
+  ggrepel::geom_text_repel(data = res_norm_vsn_all[res_norm_vsn_all$int_sign == "TRUE",], aes(label = gene), size = 3, box.padding = unit(0.1, "lines"),
+                           point.padding = unit(0.1, "lines"), segment.size = 0.5,max.overlaps = Inf) + 
+  theme_bw() +
+  theme( panel.grid.major = element_blank(), legend.position = "none",
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_blank(),
+        plot.title = element_text(hjust = 0.5)) + facet_grid(~ gel) + xlim(-2.5,2.5)+ ylim(-2.5,2.5)
+
+return(list(se_UVC = se_UVC, res_all = res_norm_vsn_all, res_evr = res_evr, plot_all = all.ggplot, UVC_genes = intersect))
+}
+
+ABCF1_DEP <- DEP_analysis(ABCF1_DEP_UVC$se, "ABCF1", "ABCF1" )
+DDX5_DEP <- DEP_analysis(DDX5_DEP_UVC$se, "DDX5", "DDX5")
+FUS_DEP <- DEP_analysis(FUS_DEP_UVC$se, "FUS", "FUS")
+hnA2B1_DEP <- DEP_analysis(hnA2B1_DEP_UVC$se, "HNRNPA2B1", "hnA2B1")
+hnC_DEP <- DEP_analysis(hnC_DEP_UVC$se, "HNRNPC", "hnC")
+hnM_DEP <- DEP_analysis(hnM_DEP_UVC$se, "HNRNPM", "hnM")
+hnU_DEP <- DEP_analysis(hnU_DEP_UVC$se, "HNRNPU", "hnU")
+ILF2_DEP <- DEP_analysis(ILF2_DEP_UVC$se, "ILF2", "ILF2")
+ILF3_DEP <- DEP_analysis(ILF3_DEP_UVC$se, "ILF3", "ILF3")
+NAT10_DEP <- DEP_analysis(NAT10_DEP_UVC$se, "NAT10", "NAT10")
+NONO_DEP <- DEP_analysis(NONO_DEP_UVC$se, "NONO", "NONO")
+RBFOX2_DEP <- DEP_analysis(RBFOX2_DEP_UVC$se, "RBFOX2", "RBFOX2")
+SFPQ_DEP <- DEP_analysis(SFPQ_DEP_UVC$se, "SFPQ", "SFPQ")
+
+head(ABCF1_DEP$res_all, n = 2)
+```
+
+```{r warning=FALSE, message=FALSE}
+write.table(ABCF1_DEP$res_evr, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/ABCF1_TMT_twofactor_results.txt", row.names = FALSE, sep = "\t")
+write.table(DDX5_DEP$res_evr, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/DDX5_TMT_twofactor_results.txt", row.names = FALSE, sep = "\t")
+write.table(FUS_DEP$res_evr, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/FUS_TMT_twofactor_results.txt", row.names = FALSE, sep = "\t")
+write.table(hnA2B1_DEP$res_evr, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/hnA2B1_TMT_twofactor_results.txt", row.names = FALSE, sep = "\t")
+write.table(hnC_DEP$res_evr, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/hnC_TMT_twofactor_results.txt", row.names = FALSE, sep = "\t")
+write.table(hnM_DEP$res_evr, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/hnM_TMT_twofactor_results.txt", row.names = FALSE, sep = "\t")
+write.table(hnU_DEP$res_evr, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/hnU_TMT_twofactor_results.txt", row.names = FALSE, sep = "\t")
+write.table(ILF2_DEP$res_evr, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/ILF2_TMT_twofactor_results.txt", row.names = FALSE, sep = "\t")
+write.table(ILF3_DEP$res_evr, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/ILF3_TMT_twofactor_results.txt", row.names = FALSE, sep = "\t")
+write.table(NAT10_DEP$res_evr, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/NAT10_TMT_twofactor_results.txt", row.names = FALSE, sep = "\t")
+write.table(NONO_DEP$res_evr, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/NONO_TMT_twofactor_results.txt", row.names = FALSE, sep = "\t")
+write.table(RBFOX2_DEP$res_evr, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/RBFOX2_TMT_twofactor_results.txt", row.names = FALSE, sep = "\t")
+write.table(SFPQ_DEP$res_evr, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/SFPQ_TMT_twofactor_results.txt", row.names = FALSE, sep = "\t")
+
+write.table(ABCF1_DEP$res_all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/ABCF1_TMT_twofactor_results_sub.txt", row.names = FALSE, sep = "\t")
+write.table(DDX5_DEP$res_all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/DDX5_TMT_twofactor_results_sub.txt", row.names = FALSE, sep = "\t")
+write.table(FUS_DEP$res_all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/FUS_TMT_twofactor_results_sub.txt", row.names = FALSE, sep = "\t")
+write.table(hnA2B1_DEP$res_all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/hnA2B1_TMT_twofactor_results_sub.txt", row.names = FALSE, sep = "\t")
+write.table(hnC_DEP$res_all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/hnC_TMT_twofactor_results_sub.txt", row.names = FALSE, sep = "\t")
+write.table(hnM_DEP$res_all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/hnM_TMT_twofactor_results_sub.txt", row.names = FALSE, sep = "\t")
+write.table(hnU_DEP$res_all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/hnU_TMT_twofactor_results_sub.txt", row.names = FALSE, sep = "\t")
+write.table(ILF2_DEP$res_all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/ILF2_TMT_twofactor_results_sub.txt", row.names = FALSE, sep = "\t")
+write.table(ILF3_DEP$res_all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/ILF3_TMT_twofactor_results_sub.txt", row.names = FALSE, sep = "\t")
+write.table(NAT10_DEP$res_all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/NAT10_TMT_twofactor_results_sub.txt", row.names = FALSE, sep = "\t")
+write.table(NONO_DEP$res_all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/NONO_TMT_twofactor_results_sub.txt", row.names = FALSE, sep = "\t")
+write.table(RBFOX2_DEP$res_all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/RBFOX2_TMT_twofactor_results_sub.txt", row.names = FALSE, sep = "\t")
+write.table(SFPQ_DEP$res_all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/3_DEP/SFPQ_TMT_twofactor_results_sub.txt", row.names = FALSE, sep = "\t")
+```
+
+# 4. Visualization
+## Scatter plot of logFC high vs. low
+We plot the results of the two factor analysis. We displayed only proteins that were categorized as RDAPs (UVC-enriched) in both label-free and TMT datasets. Green dots: High-MW-zone RDAPs, Blue dots: Low-MW-zone RDAPs, red dots: ambivalent RDAPs, orange border: FDR < 0.1 between HEK293T and HepG2.
+
+```{r message=FALSE, warning=FALSE, fig.width = 22, fig.height = 20}
+ggarrange(ABCF1_DEP$plot_all,DDX5_DEP$plot_all,FUS_DEP$plot_all,hnA2B1_DEP$plot_all,
+          hnC_DEP$plot_all,hnM_DEP$plot_all,hnU_DEP$plot_all,ILF2_DEP$plot_all,
+          ILF3_DEP$plot_all,NAT10_DEP$plot_all,NONO_DEP$plot_all,RBFOX2_DEP$plot_all,
+          SFPQ_DEP$plot_all, ncol = 3, nrow = 5)
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+# Save the bubble plot as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/4_Visualization/DEP_results_twofactors.pdf", height = 20, width = 22)
+ggarrange(ABCF1_DEP$plot_all,DDX5_DEP$plot_all,FUS_DEP$plot_all,hnA2B1_DEP$plot_all,
+          hnC_DEP$plot_all,hnM_DEP$plot_all,hnU_DEP$plot_all,ILF2_DEP$plot_all,
+          ILF3_DEP$plot_all,NAT10_DEP$plot_all,NONO_DEP$plot_all,RBFOX2_DEP$plot_all,
+          SFPQ_DEP$plot_all, ncol = 3, nrow = 5)
+dev.off()
+```
+
+## CDF of high-MW-zone and low-MW-zone
+```{r  message=FALSE, warning=FALSE, fig.width = 10, fig.height = 5}
+#Load MW table
+MW_prot <- read.delim("/Users/lducoli/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/0_TMT_data/Tot_prot_MW.txt", header = TRUE)
+MW_prot$gene <- gsub("\\..*","",MW_prot$gene)
+MW_prot <- unique(MW_prot)
+
+#Group definition
+H293T_lvls <- list(none = "FALSE_FALSE", Low_MW_zone = "FALSE_TRUE", High_MW_zone = "TRUE_FALSE")
+HepG2_lvls <- list(none = "FALSE_FALSE", Low_MW_zone = "FALSE_TRUE", High_MW_zone = "TRUE_FALSE")
+
+#Determine the class for each cell type
+get_MW <- function(rbp) {
+  data <- get(paste(rbp, "_DEP", sep = ""))
+  data$res_all$HEK293T_order_sign <- factor(paste(data$res_all$logFC.x > 0 & data$res_all$fdr.x < 0.05, 
+                                                  data$res_all$logFC.x < 0 & data$res_all$fdr.x < 0.05, sep = "_"))
+  levels(data$res_all$HEK293T_order_sign) <- H293T_lvls
+  data$res_all$HepG2_order_sign <- factor(paste(data$res_all$logFC.y > 0 & data$res_all$fdr.y < 0.05, 
+                                                data$res_all$logFC.y < 0 & data$res_all$fdr.y < 0.05, sep = "_"))
+  levels(data$res_all$HepG2_order_sign) <- HepG2_lvls
+  colnames(data$res_all)[1] <- "name"
+  MW <- merge(data$res_all, get(rbp)[,1:2], by = c("name"), all.x = TRUE)
+  MW <- merge(MW, MW_prot, by = c("ID"))
+  return(list(data = data$res_all, MW = MW))
+}
+
+ABCF1_MW <- get_MW("ABCF1" )
+DDX5_MW <- get_MW("DDX5")
+FUS_MW <- get_MW("FUS")
+hnA2B1_MW <- get_MW("hnA2B1")
+hnC_MW <- get_MW("hnC")
+hnM_MW <- get_MW("hnM")
+hnU_MW <- get_MW("hnU")
+ILF2_MW <- get_MW("ILF2")
+ILF3_MW <- get_MW("ILF3")
+NAT10_MW <- get_MW("NAT10")
+NONO_MW <- get_MW("NONO")
+RBFOX2_MW <- get_MW("RBFOX2")
+SFPQ_MW <- get_MW("SFPQ")
+
+#Get the proteins
+Tot_UVC <- unique(rbind(unique(ABCF1_MW$MW[,c(1,2,20,21,22)]), unique(DDX5_MW$MW[,c(1,2,20,21,22)]), unique(FUS_MW$MW[,c(1,2,20,21,22)]),
+                        unique(hnA2B1_MW$MW[,c(1,2,20,21,22)]), unique(hnC_MW$MW[,c(1,2,20,21,22)]), unique(hnM_MW$MW[,c(1,2,20,21,22)]),
+                        unique(hnU_MW$MW[,c(1,2,20,21,22)]), unique(ILF2_MW$MW[,c(1,2,20,21,22)]), unique(ILF3_MW$MW[,c(1,2,20,21,22)]),
+                        unique(NAT10_MW$MW[,c(1,2,20,21,22)]),unique(NONO_MW$MW[,c(1,2,20,21,22)]),unique(RBFOX2_MW$MW[,c(1,2,20,21,22)]), 
+                        unique(SFPQ_MW$MW[,c(1,2,20,21,22)])))
+
+
+Tot_UVC_HEK293T <- Tot_UVC[,c(1:3,5)]
+Tot_UVC_HEK293T$celltype <- "HEK293T"
+colnames(Tot_UVC_HEK293T)[3] <- "order_sign"
+Tot_UVC_HEK293T <- unique(Tot_UVC_HEK293T)
+
+Tot_UVC_HepG2 <- Tot_UVC[,c(1:2,4,5)]
+Tot_UVC_HepG2$celltype <- "HepG2"
+colnames(Tot_UVC_HepG2)[3] <- "order_sign"
+Tot_UVC_HepG2 <- unique(Tot_UVC_HepG2)
+
+Tot_UVC <- rbind(Tot_UVC_HEK293T, Tot_UVC_HepG2)
+
+ggplot(data=Tot_UVC, aes(x=MW, group=order_sign, colour=order_sign)) +
+  stat_ecdf() +
+  ggtitle("Cumulative fraction of high and low-MW RDAP molecular weights (MW)") +
+  xlim(0, 400) +
+  scale_color_manual(values = c("#1d1d1b", "#2256ca", "#00a04c")) +
+  geom_vline(xintercept = c(60,350), linetype="dashed", color = "black", size=0.5) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_blank(),
+        plot.title = element_text(hjust = 0.5)) + facet_grid(~celltype)
+
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+# Save the bubble plot as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/4_Visualization/CDF_high_low_MW.pdf", height = 5, width = 10)
+ggplot(data=Tot_UVC, aes(x=MW, group=order_sign, colour=order_sign)) +
+  stat_ecdf() +
+  ggtitle("Cumulative fraction of high and low-MW RDAP molecular weights (MW)") +
+  xlim(0, 400) +
+  scale_color_manual(values = c("#1d1d1b",  "#2256ca", "#00a04c")) +
+  geom_vline(xintercept = c(60,350), linetype="dashed", color = "black", size=0.5) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_blank(),
+        plot.title = element_text(hjust = 0.5)) + facet_grid(~celltype)
+dev.off()
+```
+
+```{r message=FALSE, warning=FALSE}
+#KS test
+data.frame( row.names = c("HEK293T", "HepG2"), 
+            highvsbackground = c(ks.test(Tot_UVC_HEK293T$MW[Tot_UVC_HEK293T$order_sign == "none"], 
+                                         Tot_UVC_HEK293T$MW[Tot_UVC_HEK293T$order_sign == "High_MW_zone"] , alternative = 'two.sided')$p.value,
+                                 ks.test(Tot_UVC_HepG2$MW[Tot_UVC_HepG2$order_sign == "none"], 
+                                         Tot_UVC_HepG2$MW[Tot_UVC_HepG2$order_sign == "High_MW_zone"] , alternative = 'two.sided')$p.value),
+            lowvsbackground = c(ks.test(Tot_UVC_HEK293T$MW[Tot_UVC_HEK293T$order_sign == "none"], 
+                                         Tot_UVC_HEK293T$MW[Tot_UVC_HEK293T$order_sign == "Low_MW_zone"] , alternative = 'two.sided')$p.value,
+                                 ks.test(Tot_UVC_HepG2$MW[Tot_UVC_HepG2$order_sign == "none"], 
+                                         Tot_UVC_HepG2$MW[Tot_UVC_HepG2$order_sign == "Low_MW_zone"] , alternative = 'two.sided')$p.value),
+            highvslow = c(ks.test(Tot_UVC_HEK293T$MW[Tot_UVC_HEK293T$order_sign == "Low_MW_zone"], 
+                                         Tot_UVC_HEK293T$MW[Tot_UVC_HEK293T$order_sign == "High_MW_zone"] , alternative = 'two.sided')$p.value,
+                                 ks.test(Tot_UVC_HepG2$MW[Tot_UVC_HepG2$order_sign == "Low_MW_zone"], 
+                                         Tot_UVC_HepG2$MW[Tot_UVC_HepG2$order_sign == "High_MW_zone"] , alternative = 'two.sided')$p.value))
+```
+
+## Heatmap of slope values
+We calculated the slope from normalized log2-transformed TMT intensities across the three RNP subzones. We then displayed these values as an heatmap and through clustering, we have identified 20 RDAPs with not only multi-protein assembly tendency but also cell-type differences.
+```{r message=FALSE, warning=FALSE}
+merge.all <- function(x, ..., by = "row.names") {
+  L <- list(...)
+  for (i in seq_along(L)) {
+    x <- merge(x, L[[i]], by = by, all = TRUE)
+    rownames(x) <- x$Row.names
+    x$Row.names <- NULL
+  }
+  return(x)
+}
+
+#Get all proteins with cell-type enrichment
+Tot_TMT_int <- unique(c(unique(ABCF1_DEP$res_all$gene[ABCF1_DEP$res_all$int_sign == "TRUE"]),
+                        unique(DDX5_DEP$res_all$gene[DDX5_DEP$res_all$int_sign == "TRUE"]),
+                        unique(FUS_DEP$res_all$gene[FUS_DEP$res_all$int_sign == "TRUE"]),
+                        unique(hnA2B1_DEP$res_all$gene[hnA2B1_DEP$res_all$int_sign == "TRUE"]),
+                        unique(hnC_DEP$res_all$gene[hnC_DEP$res_all$int_sign == "TRUE"]),
+                        unique(hnM_DEP$res_all$gene[hnM_DEP$res_all$int_sign == "TRUE"]),
+                        unique(hnU_DEP$res_all$gene[hnU_DEP$res_all$int_sign == "TRUE"]),
+                        unique(ILF2_DEP$res_all$gene[ILF2_DEP$res_all$int_sign == "TRUE"]),
+                        unique(ILF3_DEP$res_all$gene[ILF3_DEP$res_all$int_sign == "TRUE"]),
+                        unique(NAT10_DEP$res_all$gene[NAT10_DEP$res_all$int_sign == "TRUE"]),
+                        unique(NONO_DEP$res_all$gene[NONO_DEP$res_all$int_sign == "TRUE"]),
+                        unique(RBFOX2_DEP$res_all$gene[RBFOX2_DEP$res_all$int_sign == "TRUE"]),
+                        unique(SFPQ_DEP$res_all$gene[SFPQ_DEP$res_all$int_sign == "TRUE"])))
+
+#Average the replicates
+rowMeans_function <- function(data, rbp) {
+data <- as.data.frame(assay(data))
+data$H293T_low_avg <- rowMeans(data[,c(1,4)])
+data$H293T_med_avg <- rowMeans(data[,c(2,5)])
+data$H293T_high_avg <- rowMeans(data[,c(3,6)])
+data$HepG2_low_avg <- rowMeans(data[,c(7,10)])
+data$HepG2_med_avg <- rowMeans(data[,c(8,11)])
+data$HepG2_high_avg <- rowMeans(data[,c(9,12)])
+data <- data[,13:18]
+colnames(data) <- paste(rbp, colnames(data), sep="_")
+data2 <- data[rownames(data) %in% Tot_TMT_int,]
+data2 <- data2[rownames(data2) %in% get(paste(rbp, "_DEP", sep = ""))$UVC_genes,]
+return(list(unflt = data, flt = data2))
+}
+
+ABCF1_data <- rowMeans_function(ABCF1_DEP$se_UVC, "ABCF1")
+DDX5_data <- rowMeans_function(DDX5_DEP$se_UVC, "DDX5")
+FUS_data <- rowMeans_function(FUS_DEP$se_UVC, "FUS")
+hnA2B1_data <- rowMeans_function(hnA2B1_DEP$se_UVC, "hnA2B1")
+hnC_data <- rowMeans_function(hnC_DEP$se_UVC, "hnC")
+hnM_data <- rowMeans_function(hnM_DEP$se_UVC, "hnM")
+hnU_data <- rowMeans_function(hnU_DEP$se_UVC, "hnU")
+ILF2_data <- rowMeans_function(ILF2_DEP$se_UVC, "ILF2")
+ILF3_data <- rowMeans_function(ILF3_DEP$se_UVC, "ILF3")
+NAT10_data <- rowMeans_function(NAT10_DEP$se_UVC, "NAT10")
+NONO_data <- rowMeans_function(NONO_DEP$se_UVC, "NONO")
+RBFOX2_data <- rowMeans_function(RBFOX2_DEP$se_UVC, "RBFOX2")
+SFPQ_data <- rowMeans_function(SFPQ_DEP$se_UVC, "SFPQ")
+
+
+all_data <- merge.all(ABCF1_data$flt,DDX5_data$flt,FUS_data$flt,hnA2B1_data$flt,hnC_data$flt,hnM_data$flt,hnU_data$flt,ILF2_data$flt,ILF3_data$flt,NAT10_data$flt,NONO_data$flt,RBFOX2_data$flt,SFPQ_data$flt)
+
+l <- list(c(grep("ABCF1_H293T", colnames(all_data)),grep("ABCF1_HepG2", colnames(all_data))),
+          c(grep("DDX5_H293T", colnames(all_data)),grep("DDX5_HepG2", colnames(all_data))),
+          c(grep("FUS_H293T", colnames(all_data)),grep("FUS_HepG2", colnames(all_data))),
+          c(grep("hnA2B1_H293T", colnames(all_data)),grep("hnA2B1_HepG2", colnames(all_data))),
+          c(grep("hnC_H293T", colnames(all_data)),grep("hnC_HepG2", colnames(all_data))),
+          c(grep("hnM_H293T", colnames(all_data)),grep("hnM_HepG2", colnames(all_data))),
+          c(grep("hnU_H293T", colnames(all_data)),grep("hnU_HepG2", colnames(all_data))),
+          c(grep("ILF2_H293T", colnames(all_data)),grep("ILF2_HepG2", colnames(all_data))),
+          c(grep("ILF3_H293T", colnames(all_data)),grep("ILF3_HepG2", colnames(all_data))),
+          c(grep("NAT10_H293T", colnames(all_data)),grep("NAT10_HepG2", colnames(all_data))),
+          c(grep("NONO_H293T", colnames(all_data)),grep("NONO_HepG2", colnames(all_data))),
+          c(grep("RBFOX2_H293T", colnames(all_data)),grep("RBFOX2_HepG2", colnames(all_data))),
+          c(grep("SFPQ_H293T", colnames(all_data)),grep("SFPQ_HepG2", colnames(all_data)))
+          )
+
+for (i in 1:length(l)) {
+  all_data[,l[[i]]] <- t(scale(t(all_data[,l[[i]]]), scale = FALSE, center = TRUE))
+}
+
+slope  <-  function(x){
+  if(all(is.na(x)))
+    return(NA)
+  else
+    return(coef(lm(x~I(1:3)))[2])
+}
+
+#Slope
+all_data$ABCF1_H293T_slope <- apply(all_data[,grep("ABCF1_H293T", colnames(all_data))], 1,slope)
+all_data$ABCF1_HepG2_slope <- apply(all_data[,grep("ABCF1_HepG2", colnames(all_data))], 1,slope)
+all_data$DDX5_H293T_slope <- apply(all_data[,grep("DDX5_H293T", colnames(all_data))], 1,slope)
+all_data$DDX5_HepG2_slope <- apply(all_data[,grep("DDX5_HepG2", colnames(all_data))], 1,slope)
+all_data$FUS_H293T_slope <- apply(all_data[,grep("FUS_H293T", colnames(all_data))], 1,slope)
+all_data$FUS_HepG2_slope <- apply(all_data[,grep("FUS_HepG2", colnames(all_data))], 1,slope)
+all_data$hnA2B1_H293T_slope <- apply(all_data[,grep("hnA2B1_H293T", colnames(all_data))], 1,slope)
+all_data$hnA2B1_HepG2_slope <- apply(all_data[,grep("hnA2B1_HepG2", colnames(all_data))], 1,slope)
+all_data$hnC_H293T_slope <- apply(all_data[,grep("hnC_H293T", colnames(all_data))], 1,slope)
+all_data$hnC_HepG2_slope <- apply(all_data[,grep("hnC_HepG2", colnames(all_data))], 1,slope)
+all_data$hnM_H293T_slope <- apply(all_data[,grep("hnM_H293T", colnames(all_data))], 1,slope)
+all_data$hnM_HepG2_slope <- apply(all_data[,grep("hnM_HepG2", colnames(all_data))], 1,slope)
+all_data$hnU_H293T_slope <- apply(all_data[,grep("hnU_H293T", colnames(all_data))], 1,slope)
+all_data$hnU_HepG2_slope <- apply(all_data[,grep("hnU_HepG2", colnames(all_data))], 1,slope)
+all_data$ILF2_H293T_slope <- apply(all_data[,grep("ILF2_H293T", colnames(all_data))], 1,slope)
+all_data$ILF2_HepG2_slope <- apply(all_data[,grep("ILF2_HepG2", colnames(all_data))], 1,slope)
+all_data$ILF3_H293T_slope <- apply(all_data[,grep("ILF3_H293T", colnames(all_data))], 1,slope)
+all_data$ILF3_HepG2_slope <- apply(all_data[,grep("ILF3_HepG2", colnames(all_data))], 1,slope)
+all_data$NAT10_H293T_slope <- apply(all_data[,grep("NAT10_H293T", colnames(all_data))], 1,slope)
+all_data$NAT10_HepG2_slope <- apply(all_data[,grep("NAT10_HepG2", colnames(all_data))], 1,slope)
+all_data$NONO_H293T_slope <- apply(all_data[,grep("NONO_H293T", colnames(all_data))], 1,slope)
+all_data$NONO_HepG2_slope <- apply(all_data[,grep("NONO_HepG2", colnames(all_data))], 1,slope)
+all_data$RBFOX2_H293T_slope <- apply(all_data[,grep("RBFOX2_H293T", colnames(all_data))], 1,slope)
+all_data$RBFOX2_HepG2_slope <- apply(all_data[,grep("RBFOX2_HepG2", colnames(all_data))], 1,slope)
+all_data$SFPQ_H293T_slope <- apply(all_data[,grep("SFPQ_H293T", colnames(all_data))], 1,slope)
+all_data$SFPQ_HepG2_slope <- apply(all_data[,grep("SFPQ_HepG2", colnames(all_data))], 1,slope)
+
+#Calculate the clustering
+all_data_slope <- all_data[,grep("slope", colnames(all_data))]
+all_data_slope_cl <- all_data_slope
+all_data_slope_cl[is.na(all_data_slope_cl)] <- 0
+
+hc <- hclust(dist(all_data_slope_cl), method = "ward.D2")
+
+# Plot dendogram
+plot(hclust(dist(all_data_slope_cl), method = "ward.D2"), hang = -1, cex=0.5)
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+# Save dendogram as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/4_Visualization/Dendo_slope.pdf")
+plot(hclust(dist(all_data_slope_cl), method = "ward.D2"), hang = -1, cex=0.5)
+dev.off()
+```
+
+```{r message=FALSE, warning=FALSE, fig.width=10, fig.height=5}
+#Annotation
+annotation <- MW_prot[,1:2]
+rownames(annotation) <- annotation$gene
+annotation$gene <- NULL
+annotation <- subset(annotation, rownames(annotation) %in% rownames(all_data))
+annotation2 <- data.frame(row.names = colnames(all_data_slope), celltype = rep(c("HEK293T", "HepG2"), 13))
+ann_colors <- list(MW = c(paletteer_c("grDevices::Peach", 30)), celltype =  c(HEK293T = "#f79516", HepG2 = "#00ace6"))
+
+fromList <- function (input) {
+  elements <- unique(unlist(input))
+  data <- unlist(lapply(input, function(x) {
+    x <- as.vector(match(elements, x))
+  }))
+  data[is.na(data)] <- as.integer(0)
+  data[data != 0] <- as.integer(1)
+  data <- data.frame(matrix(data, ncol = length(input), byrow = F))
+  data <- data[which(rowSums(data) != 0), ]
+  names(data) <- names(input)
+  row.names(data) <- elements
+  return(data)
+}
+
+#Heatmap color range
+my.breaks <- c(seq(-0.75, 0.75, by=0.01))
+my.colors <- rev(c(paletteer_c("ggthemes::Green-Blue-White Diverging", length(my.breaks))))
+
+lt.tsk = list(ABCF1 = unique(ABCF1_DEP$res_all$gene[ABCF1_DEP$res_all$int_sign == "TRUE"]),
+              DDX5 = unique(DDX5_DEP$res_all$gene[DDX5_DEP$res_all$int_sign == "TRUE"]),
+              FUS = unique(FUS_DEP$res_all$gene[FUS_DEP$res_all$int_sign == "TRUE"]),
+              hnA2B1 = unique(hnA2B1_DEP$res_all$gene[hnA2B1_DEP$res_all$int_sign == "TRUE"]),
+              hnC = unique(hnC_DEP$res_all$gene[hnC_DEP$res_all$int_sign == "TRUE"]),
+              hnM = unique(hnM_DEP$res_all$gene[hnM_DEP$res_all$int_sign == "TRUE"]),
+              hnU = unique(hnU_DEP$res_all$gene[hnU_DEP$res_all$int_sign == "TRUE"]),
+              ILF2 = unique(ILF2_DEP$res_all$gene[ILF2_DEP$res_all$int_sign == "TRUE"]),
+              ILF3 = unique(ILF3_DEP$res_all$gene[ILF3_DEP$res_all$int_sign == "TRUE"]),
+              NAT10 = unique(NAT10_DEP$res_all$gene[NAT10_DEP$res_all$int_sign == "TRUE"]),
+              NONO = unique(NONO_DEP$res_all$gene[NONO_DEP$res_all$int_sign == "TRUE"]),
+              RBFOX2 = unique(RBFOX2_DEP$res_all$gene[RBFOX2_DEP$res_all$int_sign == "TRUE"]),
+              SFPQ = unique(SFPQ_DEP$res_all$gene[SFPQ_DEP$res_all$int_sign == "TRUE"])
+              )
+
+# Binary table with colnames:
+sign.proteins <- fromList(lt.tsk)
+
+labels <- sign.proteins[,c(rep(1:13, each = 2))]
+colnames(labels) <- colnames(all_data[,grep("slope", colnames(all_data))])
+labels[labels == 1] <- "*"
+labels[labels == 0] <- ""
+labels <- labels[match(rownames(all_data_slope), rownames(labels)),]
+
+#Heatmap
+pheatmap <- pheatmap(
+  mat               = t(all_data_slope),
+  annotation_col = annotation,
+  annotation_row = annotation2,
+  annotation_colors = ann_colors,
+  cellwidth = 8,
+  cellheight = 6,
+  display_numbers = t(labels), 
+  fontsize_number=5.5,
+  color = my.colors,
+  breaks = my.breaks,
+  show_colnames     = TRUE,
+  show_rownames     = TRUE,
+  drop_levels       = TRUE,
+  fontsize          = 5.5,
+  cluster_rows      = FALSE,
+  cluster_cols      = hc,
+  gaps_row = c(2,4,6,8,10,12,14,16,18,20,22,24),
+  na_col = "lightgrey"
+)
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+# Save the heatmap
+pheatmap(
+  mat               = t(all_data_slope),
+  annotation_col = annotation,
+  annotation_row = annotation2,
+  annotation_colors = ann_colors,
+  cellwidth = 8,
+  cellheight = 6,
+  display_numbers = t(labels), 
+  fontsize_number=5.5,
+  color = my.colors,
+  breaks = my.breaks,
+  show_colnames     = TRUE,
+  show_rownames     = TRUE,
+  drop_levels       = TRUE,
+  fontsize          = 5.5,
+  cluster_rows      = FALSE,
+  cluster_cols      = hc,
+  gaps_row = c(2,4,6,8,10,12,14,16,18,20,22,24),
+  na_col = "lightgrey",
+  width = 10,
+  height = 5,
+  filename = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/4_Visualization/HM_TMT_sign_int.pdf"
+)
+```
+
+## Network analysis between HEK293T and HepG2
+Network analysis was performed between the 13 RBPs and the high-MW RDAP cluster member identified above. We used a spin-glass model to identify communities in the different networks.
+```{r message=FALSE, warning=FALSE, fig.width=30, fig.height=10}
+weight.community <- function(row,membership,weigth.within,weight.between){
+  if(as.numeric(membership[which(names(membership)==row[1])])==as.numeric(membership[which(names(membership)==row[2])])){weight=weigth.within
+  }else{
+    weight=weight.between
+    }
+  return(weight)
+  }
+
+Get_network_table <- function(rbp) {
+  gel_order <- get(paste(rbp, "_MW", sep = ""))$MW[,c(1,2,17,19,20,21,23)]
+  gel_order <- subset(gel_order, name %in% cluster$name[cluster$cluster == 2])
+  gel_order$rbp <- rbp
+  return(gel_order)
+}
+
+#Cluster
+cluster <- data.frame(name = rownames(all_data_slope), cluster = cutree(hc, k=3))
+rownames(cluster) <- NULL
+
+#get table for network
+ABCF1_g <- Get_network_table("ABCF1")
+DDX5_g <- Get_network_table("DDX5")
+FUS_g <- Get_network_table("FUS")
+hnA2B1_g <- Get_network_table("hnA2B1")
+hnA2B1_g$rbp <- "HNRNPA2B1"
+hnC_g <- Get_network_table("hnC")
+hnC_g$rbp <- "HNRNPC"
+hnM_g <- Get_network_table("hnM")
+hnM_g$rbp <- "HNRNPM"
+hnU_g <- Get_network_table("hnU")
+hnU_g$rbp <- "HNRNPU"
+ILF2_g <- Get_network_table("ILF2")
+ILF3_g <- Get_network_table("ILF3")
+NAT10_g <- Get_network_table("NAT10")
+NONO_g <- Get_network_table("NONO")
+RBFOX2_g <- Get_network_table("RBFOX2")
+SFPQ_g <- Get_network_table("SFPQ")
+
+#Get connection for every RBP
+gel_order <- rbind(ABCF1_g,DDX5_g,FUS_g,hnA2B1_g,hnC_g,hnM_g,hnU_g,ILF2_g,ILF3_g,NAT10_g,NONO_g,RBFOX2_g,SFPQ_g)
+
+#Prepare dataset for clustering
+gel_order$HEK293T_edges <- paste(gel_order$HEK293T_order_sign, gel_order$int_sign, sep="_")
+gel_order$HEK293T_edges <- factor(gel_order$HEK293T_edges)
+levels(gel_order$HEK293T_edges) <- c("#00a04c", "#770003","#2256ca", "orange", "#868686","#868686")
+gel_order$HepG2_edges <- paste(gel_order$HepG2_order_sign, gel_order$int_sign, sep="_")
+gel_order$HepG2_edges <- factor(gel_order$HepG2_edges)
+levels(gel_order$HepG2_edges) <- c("#00a04c", "#770003", "orange", "#868686","#868686")
+
+network_object <- function(data, celltype) {
+  set.seed(5)
+  nodes <- data.frame(name=unique(c(data$rbp,data$name)),
+                    type=c(rep("Bait", 13), rep("RDAP", length(unique(c(data$rbp,data$name)))-13)),
+                    size=c(rep(15, 13), rep(3, length(unique(c(data$rbp,data$name)))-13)))
+  edges <- data.frame(from= data$rbp,
+                        to=data$name,
+                        celltype=data[,colnames(data) == paste(celltype, "_edges", sep = "")])
+  g <- graph.data.frame(edges, directed=TRUE, vertices=nodes)
+  g <- simplify(g, remove.multiple = F, remove.loops = T) 
+  E(g)$color <- E(g)$celltype
+  clp <- cluster_spinglass(as.undirected(g))
+  mod <- modularity(clp)
+  V(g)$community <- clp$membership
+  E(g)$weight=apply(get.edgelist(g),1,weight.community,membership(clp),10,1)
+  g$layout=layout.fruchterman.reingold(g,weights=E(g)$weight)
+  colrs <- c(paletteer_dynamic("cartography::multi.pal", length(unique(clp$membership))))
+  return(list(clp = clp, colrs = colrs, g = g, mod = mod))
+}
+
+#High
+gel_order_high <- subset(gel_order, gel %in% "High")
+
+gel_order_high_HEK293T <- subset(gel_order_high, HEK293T_edges != "#868686")
+gel_order_high_HepG2 <- subset(gel_order_high, HepG2_edges != "#868686")
+
+HEK293T_high <- network_object(gel_order_high_HEK293T, "HEK293T")
+HepG2_high <- network_object(gel_order_high_HepG2, "HepG2")
+
+#Medium
+gel_order_medium <- subset(gel_order, gel %in% "Medium")
+
+gel_order_medium_HEK293T <- subset(gel_order_medium, HEK293T_edges != "#868686")
+gel_order_medium_HepG2 <- subset(gel_order_medium, HepG2_edges != "#868686")
+
+HEK293T_medium <- network_object(gel_order_medium_HEK293T, "HEK293T")
+HepG2_medium <- network_object(gel_order_medium_HepG2, "HepG2")
+
+par(mfrow=c(1,4))
+plot(HEK293T_high$g, edge.arrow.size=0.5, vertex.label.color="black", vertex.label.dist=0, vertex.color=HEK293T_high$colrs[V(HEK293T_high$g)$community], edge.curved=0.2)
+plot(HepG2_high$g, edge.arrow.size=0.5, vertex.label.color="black", vertex.label.dist=0, vertex.color=HepG2_high$colrs[V(HepG2_high$g)$community], edge.curved=0.2)
+plot(HEK293T_medium$g, edge.arrow.size=0.5, vertex.label.color="black", vertex.label.dist=0, vertex.color=HEK293T_medium$colrs[V(HEK293T_medium$g)$community], edge.curved=0.2)
+plot(HepG2_medium$g, edge.arrow.size=0.5, vertex.label.color="black", vertex.label.dist=0, vertex.color=HepG2_medium$colrs[V(HepG2_medium$g)$community], edge.curved=0.2)
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+# Save dendogram as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/4_Visualization/Network_highMW_RDAPs.pdf", width = 30, height = 10)
+par(mfrow=c(1,4))
+plot(HEK293T_high$g, edge.arrow.size=0.5, vertex.label.color="black", vertex.label.dist=0, vertex.color=HEK293T_high$colrs[V(HEK293T_high$g)$community], edge.curved=0.2)
+plot(HepG2_high$g, edge.arrow.size=0.5, vertex.label.color="black", vertex.label.dist=0, vertex.color=HepG2_high$colrs[V(HepG2_high$g)$community], edge.curved=0.2)
+plot(HEK293T_medium$g, edge.arrow.size=0.5, vertex.label.color="black", vertex.label.dist=0, vertex.color=HEK293T_medium$colrs[V(HEK293T_medium$g)$community], edge.curved=0.2)
+plot(HepG2_medium$g, edge.arrow.size=0.5, vertex.label.color="black", vertex.label.dist=0, vertex.color=HepG2_medium$colrs[V(HepG2_medium$g)$community], edge.curved=0.2)
+dev.off()
+```
+
+## Reciprocal ratio Heatmaps for RBPs
+Similar to what we have done with the label-free irCLIP-RNP data, we have generated a reciprocal heatmap that compare the ratio of intensities across the three RNP subzones for the 13 RBPs.
+```{r message=FALSE, warning=FALSE, fig.width=10, fig.height=3}
+all_data2 <- merge.all(ABCF1_data$unflt,DDX5_data$unflt,FUS_data$unflt,hnA2B1_data$unflt,hnC_data$unflt,hnM_data$unflt,hnU_data$unflt,ILF2_data$unflt,ILF3_data$unflt,NAT10_data$unflt,NONO_data$unflt,RBFOX2_data$unflt,SFPQ_data$unflt)
+
+get_ratio <- function(data, rbp) {
+  data$H293T_rowsum <- rowSums(2^data[,grep(paste(rbp,"H293T", sep = "_"), colnames(data))])
+  data$H293T_L_ratio <- 2^data[,grep(paste(rbp,"H293T_low_avg", sep = "_"), colnames(data))]/data$H293T_rowsum
+  data$H293T_M_ratio <- 2^data[,grep(paste(rbp,"H293T_med_avg", sep = "_"), colnames(data))]/data$H293T_rowsum
+  data$H293T_H_ratio <- 2^data[,grep(paste(rbp,"H293T_high_avg", sep = "_"), colnames(data))]/data$H293T_rowsum
+  data$HepG2_rowsum <- rowSums(2^data[,grep(paste(rbp,"HepG2", sep = "_"), colnames(data))])
+  data$HepG2_L_ratio <- 2^data[,grep(paste(rbp,"HepG2_low_avg", sep = "_"), colnames(data))]/data$HepG2_rowsum
+  data$HepG2_M_ratio <- 2^data[,grep(paste(rbp,"HepG2_med_avg", sep = "_"), colnames(data))]/data$HepG2_rowsum
+  data$HepG2_H_ratio <- 2^data[,grep(paste(rbp,"HepG2_high_avg", sep = "_"), colnames(data))]/data$HepG2_rowsum
+  data$H293T_rowsum <- NULL
+  data$HepG2_rowsum <- NULL
+  colnames(data)[grep("ratio", colnames(data))] <- paste(rbp, colnames(data)[grep("ratio", colnames(data))], sep = "_")
+  return(data)
+}
+
+ABCF1_ratio <- get_ratio(all_data2, "ABCF1")
+DDX5_ratio <- get_ratio(all_data2, "DDX5")
+FUS_ratio <- get_ratio(all_data2, "FUS")
+hnA2B1_ratio <- get_ratio(all_data2, "hnA2B1")
+hnC_ratio <- get_ratio(all_data2, "hnC")
+hnM_ratio <- get_ratio(all_data2, "hnM")
+hnU_ratio <- get_ratio(all_data2, "hnU")
+ILF2_ratio <- get_ratio(all_data2, "ILF2")
+ILF3_ratio <- get_ratio(all_data2, "ILF3")
+NAT10_ratio <- get_ratio(all_data2, "NAT10")
+NONO_ratio <- get_ratio(all_data2, "NONO")
+RBFOX2_ratio <- get_ratio(all_data2, "RBFOX2")
+SFPQ_ratio <- get_ratio(all_data2, "SFPQ")
+
+rbp_list <- c("ABCF1", "DDX5", "FUS", "HNRNPA2B1", "HNRNPC", "HNRNPM", "HNRNPU", "ILF2", "ILF3", "NAT10", "NONO", "RBFOX2", "SFPQ")  
+
+all_data_baitratio <- cbind(ABCF1_ratio[,grep("ratio", colnames(ABCF1_ratio))], 
+                            DDX5_ratio[,grep("ratio", colnames(DDX5_ratio))],
+                            FUS_ratio[,grep("ratio", colnames(FUS_ratio))],
+                            hnA2B1_ratio[,grep("ratio", colnames(hnA2B1_ratio))],
+                            hnC_ratio[,grep("ratio", colnames(hnC_ratio))],
+                            hnM_ratio[,grep("ratio", colnames(hnM_ratio))],
+                            hnU_ratio[,grep("ratio", colnames(hnU_ratio))],
+                            ILF2_ratio[,grep("ratio", colnames(ILF2_ratio))],
+                            ILF3_ratio[,grep("ratio", colnames(ILF3_ratio))],
+                            NAT10_ratio[,grep("ratio", colnames(NAT10_ratio))],
+                            NONO_ratio[,grep("ratio", colnames(NONO_ratio))],
+                            RBFOX2_ratio[,grep("ratio", colnames(RBFOX2_ratio))],
+                            SFPQ_ratio[,grep("ratio", colnames(SFPQ_ratio))])
+all_data_baitratio <- all_data_baitratio[rbp_list,]
+
+head(all_data_baitratio)
+
+all_data_H293T <- all_data_baitratio[,grep("H293T", colnames(all_data_baitratio))]
+colnames(all_data_H293T) <- gsub("_H293T", "", colnames(all_data_H293T))
+rownames(all_data_H293T) <- paste(rownames(all_data_H293T), "H293T", sep = "_")
+all_data_HepG2 <- all_data_baitratio[,grep("HepG2", colnames(all_data_baitratio))]
+colnames(all_data_HepG2) <- gsub("_HepG2", "", colnames(all_data_HepG2))
+rownames(all_data_HepG2) <- paste(rownames(all_data_HepG2), "HepG2", sep = "_")
+
+all_data_baitratio2 <- rbind(all_data_H293T, all_data_HepG2)
+```
+
+```{r message=FALSE, warning=FALSE, fig.width=10, fig.height=5}
+#Pheatmap
+my.breaks <- c(seq(0.2, 0.5, by=0.01)) 
+my.colors <- c("#f9f9f9", rev(paletteer_c("grDevices::Greens 3" , length(my.breaks)-1)))
+
+#Annotation
+annotation_col <- data.frame(row.names = colnames(all_data_baitratio2), RNPzone = rep(c("RNPzone1", "RNPzone2", "RNPzone3"),13))
+annotation_row <- data.frame(row.names = rownames(all_data_baitratio2), celltype = rep(c("HEK293T", "HepG2"),each = 13))
+
+ann_colors2 <- list(RNPzone =  c(RNPzone1 = "#2256ca", RNPzone2 = "#b6de43", RNPzone3 = "#269541"), celltype =  c(HEK293T = "#f79516", HepG2 = "#00ace6"))
+
+pheatmap <- pheatmap(
+  mat               = all_data_baitratio2,
+  annotation_col = annotation_col,
+  annotation_row = annotation_row,
+  annotation_colors = ann_colors2,
+  cellwidth = 12,
+  cellheight = 6,
+  fontsize_number=5.5,
+  color = my.colors,
+  breaks = my.breaks,
+  show_colnames     = TRUE,
+  show_rownames     = TRUE,
+  drop_levels       = TRUE,
+  fontsize          = 5.5,
+  cluster_rows      = FALSE,
+  cluster_cols      = FALSE,
+  gaps_col = c(3,6,9,12,15,18,21,24,27,30,33,36),
+  gaps_row = c(13),
+  na_col = "lightgrey"
+)
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+# Save the heatmap
+pheatmap(
+  mat               = all_data_baitratio2,
+  annotation_col = annotation_col,
+  annotation_row = annotation_row,
+  annotation_colors = ann_colors2,
+  cellwidth = 12,
+  cellheight = 6,
+  fontsize_number=5.5,
+  color = my.colors,
+  breaks = my.breaks,
+  show_colnames     = TRUE,
+  show_rownames     = TRUE,
+  drop_levels       = TRUE,
+  fontsize          = 5.5,
+  cluster_rows      = FALSE,
+  cluster_cols      = FALSE,
+  gaps_col = c(3,6,9,12,15,18,21,24,27,30,33,36),
+  gaps_row = c(13),
+  na_col = "lightgrey",
+  width = 10,
+  height = 3,
+  filename = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/TMT_analysis/4_Visualization/HM_TMT_reciprocal.pdf"
+)
+```
+
+All the visualizations were saved as pdf and modified in illustrator.
+
+```{r}
+sessionInfo()
+```
+
+
+
