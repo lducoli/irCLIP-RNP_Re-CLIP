@@ -1,0 +1,279 @@
+---
+title: "irCLIP-RNP dataset of species mixing experiment to determine contribution of mouse/human unique peptides"
+author: "Luca Ducoli"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document: 
+    latex_engine: xelatex
+    pandoc_args: --listings
+    includes:
+      in_header: preamble.tex
+  html_document:
+    df_print: paged
+---
+
+This is the pipeline used to analyze the irCLIP-RNP datasets of species-mixing experiement. We have subjected to MS two gel sections ranging from 30 to 70kDa (named "free RNA ligation zone") and from 70 to 350KDa (named "whole RNP zone"). irCLIP-RNP for HNRNPC was performed after mixing UVC human cells (HEK293T) and noUV mouse cells (3T3s). irCLIP-RNP for HNRNPA2B1 was performed with noUV HEK293T and UVC 3T3 cells.
+
+# 1. Prepare the dataset
+```{r, message=FALSE, warning=FALSE}
+#Load the libraries
+library(trackViewer)
+library(dplyr)
+library(httr)
+library(org.Hs.eg.db)
+library(org.Mm.eg.db)
+library(paletteer)
+library(ggplot2)
+library(data.table)
+library(ggExtra)
+library(DEP2)
+library(DESeq2)
+library(ggpubr)
+```
+In the first step, we prepared the dataset to create a SummarizedExperiment object starting from the peptide.txt output file from MaxQuant.
+```{r warning=FALSE, message=FALSE, tidy=TRUE, tidy.opts=list(width.cutoff=60)}
+#Load the peptides
+data <- read.csv("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/irCLIP-RNP_control/1_Species_mixing/0_Data/peptides.txt",sep = "\t")
+
+#Remove RPL proteins
+data <- data[-grep("RPL", data$Gene.names),]
+
+#Remove not detected peptides
+data$rowsum <- rowSums(data[,grep("Intensity.", colnames(data), value = TRUE)])
+data <- subset(data, rowsum != 0)
+```
+
+# 2. Create a SummarizedExperiment
+We used the following design to create a SummarizedExperiment.
+
+```{r warning=FALSE, message=FALSE}
+#Load design matrix
+design <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/irCLIP-RNP_control/1_Species_mixing/0_Data/Design_matrix.txt")
+design
+```
+
+```{r warning=FALSE, message=FALSE}
+#Create a summarized experiment, filter, normalize, and impute
+data$ID <- c(1:nrow(data))
+data$name <- paste(data$Gene.names, data$ID, sep = "_")
+ecols <- grep("Intensity.", colnames(data), value = TRUE)
+pe <- make_pe(data, columns = ecols, expdesign = design)
+
+#Filter, normalize, and impute
+pe = filter_pe(pe, filter_formula = ~ Reverse != '+' & Potential.contaminant !="+" & Unique..Proteins. == "yes")
+pe <- normalize_pe(pe,method = "vsn", i = "peptideRaw")
+set.seed(13)
+pe <- impute_pe(pe, fun = "GSimp", name = "peptideImp", i = "peptideNorm")
+```
+# 3. ROC analysis
+We first performed a ROC analysis to compare UVC-human/noUV-mouse and noUV-human/UVC-mouse samples from the two gel sections.
+```{r message=FALSE, warning=FALSE}
+#Prepare data.frame for ROC analysis
+unique_pep <- assay(pe[[3]])
+unique_pep <- as.data.frame(unique_pep)
+rownames(unique_pep) <- pe[[3]]@elementMetadata$name
+
+#Average between samples
+unique_pep$HNRNPC_low <- rowMeans(unique_pep[c(1,3)])
+unique_pep$HNRNPC_high <- rowMeans(unique_pep[c(2,4)])
+unique_pep$HNRNPA2B1_low <- rowMeans(unique_pep[c(5,7)])
+unique_pep$HNRNPA2B1_high <- rowMeans(unique_pep[c(6,8)])
+
+#Subset mouse unique peptides
+mouse_unique_pep <- unique_pep[grepl("[a-z]", rownames(unique_pep)), ]
+mouse_unique_pep$Gene.names <- rownames(mouse_unique_pep)
+
+mouse_HNRNPClow <- mouse_unique_pep[,c(13,9)]
+colnames(mouse_HNRNPClow) <- c("Gene.names", "Int")
+
+mouse_HNRNPChigh <- mouse_unique_pep[,c(13,10)]
+colnames(mouse_HNRNPChigh) <- c("Gene.names", "Int")
+
+mouse_HNRNPA2B1low <- mouse_unique_pep[,c(13,11)]
+colnames(mouse_HNRNPA2B1low) <- c("Gene.names", "Int")
+
+mouse_HNRNPA2B1high <- mouse_unique_pep[,c(13,12)]
+colnames(mouse_HNRNPA2B1high) <- c("Gene.names", "Int")
+
+#Subset human unique peptides
+'%!in%' <- function(x,y)!('%in%'(x,y))
+human_unique_pep <- subset(unique_pep, rownames(unique_pep) %!in% rownames(mouse_unique_pep))
+human_unique_pep$Gene.names <- rownames(human_unique_pep)
+human_HNRNPClow <- human_unique_pep[,c(13,9)]
+colnames(human_HNRNPClow) <- c("Gene.names", "Int")
+human_HNRNPChigh <- human_unique_pep[,c(13,10)]
+colnames(human_HNRNPChigh) <- c("Gene.names", "Int")
+human_HNRNPA2B1low <- human_unique_pep[,c(13,11)]
+colnames(human_HNRNPA2B1low) <- c("Gene.names", "Int")
+human_HNRNPA2B1high <- human_unique_pep[,c(13,12)]
+colnames(human_HNRNPA2B1high) <- c("Gene.names", "Int")
+
+#Perform cumulative fraction analysis
+i <- seq(0, 30, by = 0.01)
+
+mouse_ECDF_HNRNPChigh <- data.frame(seq = i, ecdf = 1-(ecdf(mouse_HNRNPChigh$Int)(i)))
+colnames(mouse_ECDF_HNRNPChigh) <- c("Seq_m", "ROC_m")
+human_ECDF_HNRNPChigh <- data.frame(seq = i, ecdf = 1-(ecdf(human_HNRNPChigh$Int)(i)))
+colnames(human_ECDF_HNRNPChigh) <- c("Seq_h", "ROC_h")
+HNRNPChigh <- cbind(human_ECDF_HNRNPChigh, mouse_ECDF_HNRNPChigh)
+HNRNPChigh$type <- "HNRNPC_HumanUVC_MousenoUV_high"
+
+mouse_ECDF_HNRNPClow <- data.frame(seq = i, ecdf = 1-(ecdf(mouse_HNRNPClow$Int)(i)))
+colnames(mouse_ECDF_HNRNPClow) <- c("Seq_m", "ROC_m")
+human_ECDF_HNRNPClow <- data.frame(seq = i, ecdf = 1-(ecdf(human_HNRNPClow$Int)(i)))
+colnames(human_ECDF_HNRNPClow) <- c("Seq_h", "ROC_h")
+HNRNPClow <- cbind(human_ECDF_HNRNPClow, mouse_ECDF_HNRNPClow)
+HNRNPClow$type <- "HNRNPC_HumanUVC_MousenoUV_low"
+
+mouse_ECDF_HNRNPA2B1high <- data.frame(seq = i, ecdf = 1-(ecdf(mouse_HNRNPA2B1high$Int)(i)))
+colnames(mouse_ECDF_HNRNPA2B1high) <- c("Seq_m", "ROC_m")
+human_ECDF_HNRNPA2B1high <- data.frame(seq = i, ecdf = 1-(ecdf(human_HNRNPA2B1high$Int)(i)))
+colnames(human_ECDF_HNRNPA2B1high) <- c("Seq_h", "ROC_h")
+HNRNPA2B1high <- cbind(human_ECDF_HNRNPA2B1high, mouse_ECDF_HNRNPA2B1high)
+HNRNPA2B1high$type <- "HNRNPA2B1_HumanUVC_MousenoUV_high"
+
+mouse_ECDF_HNRNPA2B1low <- data.frame(seq = i, ecdf = 1-(ecdf(mouse_HNRNPA2B1low$Int)(i)))
+colnames(mouse_ECDF_HNRNPA2B1low) <- c("Seq_m", "ROC_m")
+human_ECDF_HNRNPA2B1low <- data.frame(seq = i, ecdf = 1-(ecdf(human_HNRNPA2B1low$Int)(i)))
+colnames(human_ECDF_HNRNPA2B1low) <- c("Seq_h", "ROC_h")
+HNRNPA2B1low <- cbind(human_ECDF_HNRNPA2B1low, mouse_ECDF_HNRNPA2B1low)
+HNRNPA2B1low$type <- "HNRNPA2B1_HumanUVC_MousenoUV_low"
+
+#Create a dataframe for plotting
+roc <- rbind(HNRNPChigh, HNRNPClow, HNRNPA2B1high, HNRNPA2B1low)
+
+ggplot(roc %>% arrange(ROC_h, ROC_m), aes(x = ROC_m, y = ROC_h, color = type)) + geom_line(linewidth = 1) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  scale_color_manual(values=c("#3896C4", "#98D9E4","#4E9F50", "#87D180")) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), #legend.position = "none",
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_blank(),
+        plot.title = element_text(hjust = 0.5)) +
+  ggtitle("ROC curve") +
+  ylab("Human-UVC/Mouse-noUV rate") +
+  xlab("Human-noUV/Mouse-UVC rate")
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+#Save ROC curve as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/irCLIP-RNP_control/1_Species_mixing/2_ROC/ROC_MouseHuman.pdf", width = 5, height = 5)
+ggplot(roc %>% arrange(ROC_h, ROC_m), aes(x = ROC_m, y = ROC_h, color = type)) + geom_line(linewidth = 1) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  scale_color_manual(values=c("#3896C4", "#98D9E4","#4E9F50", "#87D180")) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), legend.position = "none",
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_blank(),
+        plot.title = element_text(hjust = 0.5)) +
+  ggtitle("ROC curve") +
+  ylab("Human-UVC/Mouse-noUV rate") +
+  xlab("Human-noUV/Mouse-UVC rate")
+dev.off()
+```
+
+# 4. Distribution of mouse/Human unique peptide accross RBPs
+At this point, we displayed the ratio of imputed intensity of mouse/human unique peptides across some RBPs in the Human-UVC/Mouse-noUV and Human-noUV/Mouse-UVC samples. We used only the intensities coming from the gel section referred here as "high" (a.k.a. whole RNP zone) ranging from 70-350kDa. 
+```{r message=FALSE, warning=FALSE}
+#Function to draw the lolliplot
+get_lolliplot <- function(gene, species, taxid, orgDB){
+APIurl <- "https://www.ebi.ac.uk/proteins/api/"
+eid <- mget(gene, get(sub(".db", "SYMBOL2EG", orgDB)))[[1]]
+chr <- mget(eid, get(sub(".db", "CHR", orgDB)))[[1]]
+accession <- unlist(lapply(eid, function(.ele){mget(.ele, get(sub(".db", "UNIPROT", orgDB)))}))
+featureURL <- paste0(APIurl, "features?offset=0&size=-1&reviewed=true","&types=DNA_BIND%2CMOTIF%2CDOMAIN", "&taxid=", taxid,
+                     "&accession=", paste(accession, collapse = "%2C"))
+response <- GET(featureURL)
+content <- httr::content(response)
+content <- content[[1]]
+acc <- content$accession
+sequence <- content$sequence
+gr <- GRanges(chr, IRanges(1, nchar(sequence)))
+domains <- do.call(rbind, content$features)
+domains <- GRanges(chr, IRanges(as.numeric(domains[, "begin"]),as.numeric(domains[, "end"]),names = domains[, "description"]))
+domains$fill <- 1+seq_along(domains)
+domains$height <- 0.04
+fasta = readLines(paste("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/irCLIP-RNP_control/1_Species_mixing/3_Intensity_plot/", gene, "_", species, "_sequence.fasta", sep = ""))
+ids = grepl(">", fasta)
+rbp.f = data.frame(id = sub(">", "", fasta[ids]), s = tapply(fasta[!ids], cumsum(ids)[!ids], function(x) {paste(x, collapse = "")}))
+rbp <- unique_pep[rownames(unique_pep) %like% gene, ]
+rbp$name <- rownames(rbp)
+rbp <- merge(rbp, data[c(37,84)], by = "name")
+SNP <- sort(rbp$Start.position)
+
+sample.gr <- GRanges(as.character(seqnames(domains)@values), IRanges(SNP, width=1, names=paste0(SNP)))
+total_rbp_int <- (2^((rbp$HNRNPC_high_1+rbp$HNRNPC_high_2)/2)+2^((rbp$HNRNPA2B1_high_1+rbp$HNRNPA2B1_high_2)/2))
+
+sample.gr$value1 <- 2^((rbp$HNRNPC_high_1+rbp$HNRNPC_high_2)/2)/total_rbp_int
+sample.gr$value2 <- 2^((rbp$HNRNPA2B1_high_1+rbp$HNRNPA2B1_high_2)/2)/total_rbp_int
+sample.gr$color <- rep(list(c("#87CEFA", '#98CE31')), length(SNP))
+sample.gr$border <- "gray30"
+
+features <- GRanges(as.character(seqnames(domains)@values), IRanges(c(1), width=nchar(rbp.f$s), names=paste0("block", 1)))
+features$height <- c(0.03)
+
+legend <- list(labels=c("Human-UVC/Mouse-noUV", "Human-noUV/Mouse-UVC"), fill=c("#87CEFA", '#98CE31'))
+
+features.mul <- c(features, domains)
+features.mul$height[c(2:(length(domains)+1))] <- c(rep(0.01, length(domains)))
+features.mul$fill <- c("#FF8833", c(paletteer_c("grDevices::YlGnBu", (length(features.mul)-1))))
+features.mul$featureLayerID <- c("tx_1", paste("tx", rep(2, each=length(domains)), sep="_"))
+names(features.mul) <- c(gene, names(domains))
+lolliplot <- lolliplot(sample.gr, features.mul, legend = legend, ylab="Percentage imputed intensity", type="pie")
+return(lolliplot)
+}
+```
+
+## Human RBPs
+```{r message=FALSE, warning=FALSE}
+#Get lolliplot for human RBPs
+KHSRP.h.lolliplot <- get_lolliplot("KHSRP", "Human", "9606","org.Hs.eg.db")
+ELAVL1.h.lolliplot <- get_lolliplot("ELAVL1", "Human", "9606","org.Hs.eg.db")
+RALY.h.lolliplot <- get_lolliplot("RALY", "Human", "9606","org.Hs.eg.db")
+HNRNPM.h.lolliplot <- get_lolliplot("HNRNPM", "Human", "9606","org.Hs.eg.db")
+NONO.h.lolliplot <- get_lolliplot("NONO", "Human", "9606","org.Hs.eg.db")
+```
+```{r message=FALSE, warning=FALSE, results='hide'}
+#Save human lolliplot as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/irCLIP-RNP_control/1_Species_mixing/3_Intensity_plot/Human_Lolliplot.pdf")
+KHSRP.h.lolliplot <- get_lolliplot("KHSRP", "Human", "9606","org.Hs.eg.db")
+ELAVL1.h.lolliplot <- get_lolliplot("ELAVL1", "Human", "9606","org.Hs.eg.db")
+RALY.h.lolliplot <- get_lolliplot("RALY", "Human", "9606","org.Hs.eg.db")
+HNRNPM.h.lolliplot <- get_lolliplot("HNRNPM", "Human", "9606","org.Hs.eg.db")
+NONO.h.lolliplot <- get_lolliplot("NONO", "Human", "9606","org.Hs.eg.db")
+dev.off()
+```
+
+## Mouse RBPs
+```{r message=FALSE, warning=FALSE}
+#Get lolliplot for mouse RBPs
+Khsrp.m.lolliplot <- get_lolliplot("Khsrp", "Mouse", "10090", "org.Mm.eg.db")
+Elavl1.m.lolliplot <- get_lolliplot("Elavl1", "Mouse", "10090", "org.Mm.eg.db")
+Raly.m.lolliplot <- get_lolliplot("Raly", "Mouse", "10090", "org.Mm.eg.db")
+Hnrnpm.m.lolliplot <- get_lolliplot("Hnrnpm", "Mouse", "10090", "org.Mm.eg.db")
+Nono.m.lolliplot <- get_lolliplot("Nono", "Mouse", "10090", "org.Mm.eg.db")
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+#Save mouse lolliplot as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/irCLIP-RNP_control/1_Species_mixing/3_Intensity_plot/Mouse_Lolliplot.pdf")
+Khsrp.m.lolliplot <- get_lolliplot("Khsrp", "Mouse", "10090", "org.Mm.eg.db")
+Elavl1.m.lolliplot <- get_lolliplot("Elavl1", "Mouse", "10090", "org.Mm.eg.db")
+Raly.m.lolliplot <- get_lolliplot("Raly", "Mouse", "10090", "org.Mm.eg.db")
+Hnrnpm.m.lolliplot <- get_lolliplot("Hnrnpm", "Mouse", "10090", "org.Mm.eg.db")
+Nono.m.lolliplot <- get_lolliplot("Nono", "Mouse", "10090", "org.Mm.eg.db")
+dev.off()
+```
+
+All the visualizations were saved as pdf and modified in illustrator.
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
