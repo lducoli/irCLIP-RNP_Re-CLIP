@@ -1,0 +1,472 @@
+---
+title: "irCLIP-RNP dataset of HNRNPC during EGF stimulation"
+author: "Luca Ducoli"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document: 
+    latex_engine: xelatex
+    pandoc_args: --listings
+    includes:
+      in_header: preamble.tex
+  html_document:
+    df_print: paged
+---
+
+This is the pipeline used to analyze the irCLIP-RNP TMT datasets of HNRNPC during EGF stimulation from two different gel sections ranging from 60-120kDa, 120-350kDa. The experiment was performed in A431 cells.
+
+# 1. Prepare the dataset 
+```{r warning=FALSE, message=FALSE}
+#Needed libraries
+library(DEP2)
+library(tidyverse)
+library(ggplot2)
+library(data.table)
+library(pheatmap)
+library(RColorBrewer)
+library(gplots)
+library(hrbrthemes)
+library(pacman)
+library(textshape)
+library(ggExtra)
+library(viridis)
+library(purrr)
+library(hexbin)
+library(DESeq2)
+library(ggpubr)
+library(UpSetR)
+library(dplyr)
+library(Clipper)
+library(factoextra)
+library(paletteer)
+library(corrplot)
+library(psych)
+library(ggpmisc)
+library(gprofiler2)
+library(viridis)
+library(GGally)
+library(igraph)
+library(rstatix)
+library(limma)
+library(HDMD)
+library(cluster)
+```
+
+# 2. Determine the RDAPs
+We used ClippeR to determined the significant RDAPs. We used a label-free HNRNPC irCLIP-RNP dataset coming from A431 (1 noUV and 2 UVC samples).
+```{r warning=FALSE, message=FALSE}
+# Open proteinGroups.txt results from MaxQuant
+data <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/EGF_timecourse/0_Data/proteinGroups.txt")
+
+#Remove RPL proteins
+data <- data[-grep("RPL", data$Gene.names),]
+
+#Generate unique names and ids
+unique_pg <- make_unique(data, name = "Gene.names", ids = "Protein.IDs")
+unique_pg <- unique_pg %>% arrange(name)
+
+#Get the columns
+ecols <- grep("LFQ.intensity.", colnames(unique_pg))
+
+#Keep isoform with higher LFQ intensity
+iso <- grep("\\.\\d+$", unique_pg$name)
+rbp <- gsub("\\.1", "", c(unique_pg$name[iso]))
+
+#Find original row name of the isoform with higher intensity
+find_max_value <- function(rbp) {
+  filtered_df <- unique_pg[unique_pg$name %like% rbp, grep("LFQ.intensity.", colnames(unique_pg)) ]
+  filtered_df$rowSums <- rowSums(filtered_df[, grep("LFQ.intensity.", colnames(filtered_df))])
+  max_value <- which.max(filtered_df$rowSums)
+  rownames <- rownames(filtered_df)[-max_value]
+  return(rownames)
+}
+max_iso <- c(unlist(lapply(rbp, find_max_value)))
+
+#Remove low intensity isoforms
+unique_pg <- unique_pg[!(rownames(unique_pg) %in% max_iso),]
+
+# Remove all proteins detected in IgG
+unique_pg <- subset(unique_pg, LFQ.intensity.BZ101 == 0)
+
+# Remove IgG column
+unique_pg <- unique_pg[,-c(43)]
+```
+
+```{r warning=FALSE, message=FALSE}
+# Load design matrix
+design <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/EGF_timecourse/0_Data/Design_matrix.txt")
+design
+```
+
+```{r message=FALSE, warning=FALSE}
+# Create a SummarizedExperiment
+ecols <- grep("LFQ.intensity.", colnames(unique_pg))
+se <- make_se(unique_pg, columns = ecols, expdesign = design)
+se_UVC <- se[,se$condition == "UVC"]
+se_UVC <- filter_se(se_UVC, thr = 0, filter_formula = ~ Reverse != '+' & Potential.contaminant !="+" & Peptides > 1 & Unique.peptides > 0)
+se <- se[rownames(se_UVC),]
+write.table(se@assays@data@listData, file="~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/EGF_timecourse/2_A431_ClippeR/HNRNPC_A431_LFQ_intensity_raw.txt", quote = F, row.names = T, sep = "\t")
+
+set.seed(3)
+# Run Clipper
+imputed <- DEP2::impute(normalize_vsn(se), fun = "QRILC")
+data <- as.data.frame(assay(imputed))
+clipper = Clipper(score.exp = as.matrix(data[,c(1,3)]), score.back = as.matrix(data[,-c(1,3)]), FDR = 0.05, analysis = "e")
+data$FDR <- clipper$q
+data <- cbind(data, rowMeans(data[,c(1,3)])-data[2])
+colnames(data)[5] <- c("logFC")
+write.table(data, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/EGF_timecourse/2_A431_ClippeR/A431_Clipper_results.txt", quote = F, sep = "\t")
+deg <- subset(data, FDR < 0.1 & logFC > log2(3))
+
+deg
+```
+
+# 3. Perform differential enrichement analysis
+Here, we perform differential enrichment analysis of the TMT data using the DEP2 package.
+```{r message=FALSE, warning=FALSE}
+# Open TMT data that were searched with MaxQuant and processed with Perseus
+colnames <- c("name", "ID", "EGF0.R1.L",	"EGF0.R1.H",	"EGF0.R2.L",	"EGF0.R2.H",	"EGF15.R1.L",	"EGF15.R1.H",	"EGF15.R2.L",
+              "EGF15.R2.H",	"EGF30.R1.L",	"EGF30.R1.H",	"EGF30.R2.L",	"EGF30.R2.H",	"EGF60.R1.L",	"EGF60.R1.H",	"EGF60.R2.L",	"EGF60.R2.H")
+EGF_data <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/EGF_timecourse/0_TMT_data/EGF_BZ61.txt")
+EGF_data$Gene.names <- str_match_all(EGF_data$Fasta.headers, "GN=(.*?) PE") %>%  lapply(., function (x) str_c(x[,2],collapse='; ')) %>%  unlist()
+EGF_data$Prot.IDs <- str_match_all(EGF_data$Fasta.headers, "(?<=sp\\|)[[:alnum:]]+") %>%  lapply(., function (x) str_c(x[,1],collapse='; ')) %>%  unlist()
+
+#get the unique gene names and protein IDs
+EGF_data$Gene.names %>% duplicated() %>% any() # check for duplicates
+EGF_data <- make_unique(EGF_data, "Gene.names", "Prot.IDs", delim = ";")
+EGF_data$name %>% duplicated() %>% any() # must be false
+
+EGF_data <- EGF_data[,c(tail(grep("name", colnames(EGF_data) ), 1),tail(grep("ID", colnames(EGF_data) ), 1),grep("Reporter", colnames(EGF_data) ))]
+colnames(EGF_data) <- colnames
+EGF_data <- EGF_data[-grep("RPL", EGF_data$name),]
+EGF_data$name[EGF_data$name == "RBFOX1"] <- "RBFOX2"
+EGF_data$ID[EGF_data$ID == "Q9NWB1"] <- "O43251"
+
+write.table(EGF_data, file ="~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/EGF_timecourse/0_TMT_data/EGF_TMT_intensities.txt", row.names = FALSE, sep = '\t', quote = FALSE)
+
+#design matrix
+design <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/EGF_timecourse/3_DEP/0_design.txt")
+
+#generate columnns indexes
+columns_vsn <- c(grep("EGF", colnames(EGF_data)))
+
+# SummarizedExperiment
+EGF_data[,3:18] <- 2^EGF_data[,3:18]
+EGF_se_UVC_norm_vsn <- make_se(EGF_data, columns_vsn, design)
+EGF_se_UVC_norm_vsn <- normalize_vsn(EGF_se_UVC_norm_vsn)
+write.table(as.data.frame(assay(EGF_se_UVC_norm_vsn)), file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/EGF_timecourse/3_DEP/EGF_TMT_LFQ_vsn.txt", row.names = TRUE, sep = "\t")
+
+#get contrasts for each cell line and each normalization
+model_vsn <- model.matrix(~ section + time:section, colData(EGF_se_UVC_norm_vsn))
+
+#interaction analysis
+EGF_fit1_norm_int_vsn = lmFit(assay(EGF_se_UVC_norm_vsn), design = model.matrix(~ section + time:section, colData(EGF_se_UVC_norm_vsn)))
+EGF_fit2_norm_int_vsn <- eBayes(EGF_fit1_norm_int_vsn)
+EGF_int_norm_vsn_both <- topTable(EGF_fit2_norm_int_vsn, coef = c("sectionhigh:timeT15","sectionhigh:timeT30", "sectionhigh:timeT60","sectionlow:timeT15","sectionlow:timeT30", "sectionlow:timeT60"), number = length(rownames(EGF_se_UVC_norm_vsn)))
+
+EGF_sign_prot <- subset(EGF_int_norm_vsn_both, adj.P.Val < 0.1)
+EGF_sign_prot <- subset(EGF_sign_prot, 
+                        abs(sectionhigh.timeT15) > 0.3 | abs(sectionhigh.timeT30) > 0.3 | abs(sectionhigh.timeT60) > 0.3
+                        | abs(sectionlow.timeT15) > 0.3 | abs(sectionlow.timeT30) > 0.3 | abs(sectionlow.timeT60) > 0.3 )
+
+EGF_int_norm_vsn_both$gene <- rownames(EGF_int_norm_vsn_both)
+write.table(EGF_int_norm_vsn_both, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/EGF_timecourse/3_DEP/EGF_TMT_res_norm_vsn_DEP_int.txt", row.names = FALSE, sep = "\t")
+```
+
+## Scatterplot of significant RDAPs
+```{r message=FALSE, warning=FALSE, fig.height=4, fig.width=12}
+#Get significance labels for scatterplot
+EGF_int_norm_vsn_both <- subset(EGF_int_norm_vsn_both, rownames(EGF_int_norm_vsn_both) %in% rownames(deg))
+EGF_int_norm_vsn_both$int_sign <- EGF_int_norm_vsn_both$gene %in% rownames(EGF_sign_prot)
+EGF_colors <- c("FALSE" = "#999999","TRUE" =  "orange")
+
+EGF_vsn_max_axis <- c(max(c( max(EGF_int_norm_vsn_both$sectionlow.timeT15, EGF_int_norm_vsn_both$sectionhigh.timeT15),max(EGF_int_norm_vsn_both$sectionlow.timeT30, EGF_int_norm_vsn_both$sectionhigh.timeT30), max(EGF_int_norm_vsn_both$sectionlow.timeT60, EGF_int_norm_vsn_both$sectionhigh.timeT60))))
+EGF_vsn_min_axis <- c(max(abs(min(EGF_int_norm_vsn_both$sectionlow.timeT15, EGF_int_norm_vsn_both$sectionhigh.timeT15)),abs(min(EGF_int_norm_vsn_both$sectionlow.timeT30, EGF_int_norm_vsn_both$sectionhigh.timeT30)), abs(min(EGF_int_norm_vsn_both$sectionlow.timeT60, EGF_int_norm_vsn_both$sectionhigh.timeT60))))
+
+ggplot.15min <- ggplot(data=EGF_int_norm_vsn_both, aes(x=sectionlow.timeT15, y=sectionhigh.timeT15)) + geom_vline(xintercept = 0) + geom_hline(yintercept = 0) +  geom_abline(intercept = 0, linetype=2) + 
+  geom_point(shape=19, size=2, aes(col = int_sign)) +
+  labs(title = paste("15min vs. 0min:", nrow(EGF_int_norm_vsn_both))  , x = expression("log2FC low section"), y = expression("log2FC high section")) +
+  scale_color_manual(values = EGF_colors) +
+  ggrepel::geom_text_repel(data = EGF_int_norm_vsn_both[EGF_int_norm_vsn_both$int_sign == "TRUE",], aes(label = gene), size = 3, box.padding = unit(0.1, "lines"), point.padding = unit(0.1, "lines"), segment.size = 0.5,max.overlaps = Inf) + 
+  theme_bw() +
+  theme(legend.position = "none", panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        plot.title = element_text(hjust = 0.5)) +
+  xlim(-EGF_vsn_min_axis, EGF_vsn_max_axis) +
+  ylim(-EGF_vsn_min_axis, EGF_vsn_max_axis)
+
+
+ggplot.30min <- ggplot(data=EGF_int_norm_vsn_both, aes(x=sectionlow.timeT30, y=sectionhigh.timeT30)) + geom_vline(xintercept = 0) + geom_hline(yintercept = 0) +  geom_abline(intercept = 0, linetype=2) + 
+  geom_point(shape=19, size=2, aes(col = int_sign)) +
+  labs(title = paste("30min vs. 0min:", nrow(EGF_int_norm_vsn_both))  , x = expression("log2FC low section"), y = expression("log2FC high section")) +
+  scale_color_manual(values = EGF_colors) +
+  ggrepel::geom_text_repel(data = EGF_int_norm_vsn_both[EGF_int_norm_vsn_both$int_sign == "TRUE",], aes(label = gene), size = 3, box.padding = unit(0.1, "lines"), point.padding = unit(0.1, "lines"), segment.size = 0.5,max.overlaps = Inf) + 
+  theme_bw() +
+  theme(legend.position = "none", panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        plot.title = element_text(hjust = 0.5)) +
+  xlim(-EGF_vsn_min_axis, EGF_vsn_max_axis) +
+  ylim(-EGF_vsn_min_axis, EGF_vsn_max_axis)
+
+ggplot.60min <- ggplot(data=EGF_int_norm_vsn_both, aes(x=sectionlow.timeT60, y=sectionhigh.timeT60)) + geom_vline(xintercept = 0) + geom_hline(yintercept = 0) +  geom_abline(intercept = 0, linetype=2) + 
+  geom_point(shape=19, size=2, aes(col = int_sign)) +
+  labs(title = paste("60min vs. 0min:", nrow(EGF_int_norm_vsn_both))  , x = expression("log2FC low section"), y = expression("log2FC high section")) +
+  scale_color_manual(values = EGF_colors) +
+  ggrepel::geom_text_repel(data = EGF_int_norm_vsn_both[EGF_int_norm_vsn_both$int_sign == "TRUE",], aes(label = gene), size = 3, box.padding = unit(0.1, "lines"), point.padding = unit(0.1, "lines"), segment.size = 0.5,max.overlaps = Inf) + 
+  theme_bw() +
+  theme(legend.position = "none", panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        plot.title = element_text(hjust = 0.5)) +
+  xlim(-EGF_vsn_min_axis, EGF_vsn_max_axis) +
+  ylim(-EGF_vsn_min_axis, EGF_vsn_max_axis)
+
+
+ggarrange(ggplot.15min ,ggplot.30min, ggplot.60min, ncol = 3)
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/EGF_timecourse/4_Visualization/EGF_DEP_scatter_vsn_plot.pdf", height = 6, width = 18)
+ggarrange(ggplot.15min ,ggplot.30min, ggplot.60min, ncol = 3)
+dev.off()
+```
+
+## Heatmap of significant RDAPs
+```{r  message=FALSE, warning=FALSE, fig.height=7, fig.width=5}
+#Heatmap
+EGF_int_norm_vsn_15low <- topTable(EGF_fit2_norm_int_vsn, coef = c("sectionlow:timeT15"), number = length(rownames(EGF_se_UVC_norm_vsn)))
+EGF_sign_15low <- subset(EGF_int_norm_vsn_15low,  adj.P.Val < 0.1 & abs(logFC) > 0.3)
+EGF_int_norm_vsn_15high <- topTable(EGF_fit2_norm_int_vsn, coef = c("sectionhigh:timeT15"), number = length(rownames(EGF_se_UVC_norm_vsn)))
+EGF_sign_15high <- subset(EGF_int_norm_vsn_15high,  adj.P.Val < 0.1 & abs(logFC) > 0.3)
+
+EGF_int_norm_vsn_30low <- topTable(EGF_fit2_norm_int_vsn, coef = c("sectionlow:timeT30"), number = length(rownames(EGF_se_UVC_norm_vsn)))
+EGF_sign_30low <- subset(EGF_int_norm_vsn_30low,  adj.P.Val < 0.1 & abs(logFC) > 0.3)
+EGF_int_norm_vsn_30high <- topTable(EGF_fit2_norm_int_vsn, coef = c("sectionhigh:timeT30"), number = length(rownames(EGF_se_UVC_norm_vsn)))
+EGF_sign_30high <- subset(EGF_int_norm_vsn_30high,  adj.P.Val < 0.1 & abs(logFC) > 0.3)
+
+EGF_int_norm_vsn_60low <- topTable(EGF_fit2_norm_int_vsn, coef = c("sectionlow:timeT60"), number = length(rownames(EGF_se_UVC_norm_vsn)))
+EGF_sign_60low <- subset(EGF_int_norm_vsn_60low,  adj.P.Val < 0.1 & abs(logFC) > 0.3)
+EGF_int_norm_vsn_60high <- topTable(EGF_fit2_norm_int_vsn, coef = c("sectionhigh:timeT60"), number = length(rownames(EGF_se_UVC_norm_vsn)))
+EGF_sign_60high <- subset(EGF_int_norm_vsn_60high,  adj.P.Val < 0.1 & abs(logFC) > 0.3)
+
+lt.tsk = list(T15_low = rownames(EGF_sign_15low),
+              T15_high = rownames(EGF_sign_15high),
+              T30_low = rownames(EGF_sign_30low),
+              T30_high = rownames(EGF_sign_30high),
+              T60_low = rownames(EGF_sign_60low),
+              T60_high = rownames(EGF_sign_60high))
+
+fromList <- function (input) {
+  elements <- unique(unlist(input))
+  data <- unlist(lapply(input, function(x) {
+    x <- as.vector(match(elements, x))
+  }))
+  data[is.na(data)] <- as.integer(0)
+  data[data != 0] <- as.integer(1)
+  data <- data.frame(matrix(data, ncol = length(input), byrow = F))
+  data <- data[which(rowSums(data) != 0), ]
+  names(data) <- names(input)
+  row.names(data) <- elements
+  return(data)
+}
+
+#Binary table with colnames:
+sign.proteins <- fromList(lt.tsk)
+sign.proteins <- subset(sign.proteins, rownames(sign.proteins) %in% rownames(EGF_int_norm_vsn_both)[EGF_int_norm_vsn_both$int_sign == TRUE])
+write.table(sign.proteins, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/EGF_timecourse/4_Visualization/EGF_sign_int_upset.txt", row.names = TRUE, sep = "\t")
+
+#Matrix
+EGF_sign_prot_HM <- EGF_sign_prot[,c(1,4,2,5,3,6)]
+EGF_sign_prot_HM <- subset(EGF_sign_prot_HM, rownames(EGF_sign_prot_HM) %in% rownames(EGF_int_norm_vsn_both)[EGF_int_norm_vsn_both$int_sign == TRUE])
+
+EGF_sign_prot_HM$name <- rownames(EGF_sign_prot_HM)
+EGF_sign_prot_HM <- EGF_sign_prot_HM %>% 
+  pivot_longer(
+    cols = colnames(EGF_sign_prot_HM)[1:6], 
+    names_to = "time_section", 
+    values_to = "logFC"
+  )
+
+EGF_sign_prot_HM <- EGF_sign_prot_HM %>% separate(time_section, c('section', 'time'))
+
+EGF_sign_prot_HM <- EGF_sign_prot_HM %>%
+  pivot_wider(
+    names_from = c(time),
+    values_from = logFC
+  )
+
+group = matrix(EGF_sign_prot_HM$name)
+group = t(group[,1]) 
+
+#Mahala clustering
+variables = c("timeT15", "timeT30", "timeT60")
+variables = as.matrix(EGF_sign_prot_HM[,variables]) 
+mahala_sq = pairwise.mahalanobis(x=variables, grouping=group)
+names = rownames(mahala_sq$means)
+
+mahala = sqrt(mahala_sq$distance)
+rownames(mahala) = names
+colnames(mahala) = names
+
+cluster = agnes(mahala,diss=TRUE,keep.diss=FALSE,method="ward")
+
+orders <- rownames(mahala)[cluster$order]
+orders <- rep(orders, each = 2)
+match <- match(orders, EGF_sign_prot_HM$name)
+
+match[c(1:length(match))[lapply(c(1:length(match)), "%%", 2) == 0]] <- match[c(1:length(match))[lapply(c(1:length(match)), "%%", 2) == 0]]+1
+
+EGF_sign_prot_HM2 <- EGF_sign_prot_HM[match,]
+
+EGF_sign_prot_HM_mx <- as.matrix(EGF_sign_prot_HM2[3:5])
+rownames(EGF_sign_prot_HM_mx) <- paste(EGF_sign_prot_HM2$name, EGF_sign_prot_HM2$section, sep = "_")
+rownames(EGF_sign_prot_HM_mx) <- sub("section", "", rownames(EGF_sign_prot_HM_mx))
+
+#Color palette and annotation
+my.breaks <- c(seq(-1, 1, by=0.01))
+my.colors <- c(rev(paletteer_c("ggthemes::Green-Blue-White Diverging", length(my.breaks))))
+
+sign.proteins$name <- rownames(sign.proteins)
+sign.proteins2 <- sign.proteins %>% 
+  pivot_longer(
+    cols = colnames(sign.proteins)[1:6], 
+    names_to = "time_section", 
+    values_to = "sign"
+  )
+
+sign.proteins2 <- sign.proteins2 %>% separate(time_section, c('time', 'section'))
+
+sign.proteins2 <- sign.proteins2 %>%
+  pivot_wider(
+    names_from = c(time),
+    values_from = sign
+  )
+
+sign.proteins2 <- as.data.frame(sign.proteins2)
+rownames(sign.proteins2) <- paste(sign.proteins2$name, sign.proteins2$section, sep = "_")
+sign.proteins3 <- sign.proteins2[rownames(sign.proteins2) %in% rownames(EGF_sign_prot_HM_mx),]
+labels <- sign.proteins3[,c(3:5)]
+colnames(labels) <- colnames(EGF_sign_prot_HM_mx)
+labels[labels == 1] <- "*"
+labels[labels == 0] <- ""
+labels <- labels[match(rownames(EGF_sign_prot_HM_mx), rownames(labels)),]
+
+#Heatmap
+pheatmap <- pheatmap(
+  mat               = EGF_sign_prot_HM_mx,
+  cellwidth = 12,
+  cellheight = 6,
+  display_numbers = labels,
+  fontsize_number=5.5,
+  color = my.colors,
+  breaks = my.breaks,
+  show_colnames     = TRUE,
+  show_rownames     = TRUE,
+  drop_levels       = TRUE,
+  fontsize          = 5.5,
+  cluster_rows      = FALSE,
+  cluster_cols      = FALSE,
+  gaps_row = c(1:length(rownames(EGF_sign_prot_HM_mx)))[lapply(c(1:length(rownames(EGF_sign_prot_HM_mx))), "%%", 2) == 0],
+)
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+#Save heatmap
+pheatmap <- pheatmap(
+  mat               = EGF_sign_prot_HM_mx,
+  cellwidth = 12,
+  cellheight = 6,
+  display_numbers = labels,
+  fontsize_number=5.5,
+  color = my.colors,
+  breaks = my.breaks,
+  show_colnames     = TRUE,
+  show_rownames     = TRUE,
+  drop_levels       = TRUE,
+  fontsize          = 5.5,
+  cluster_rows      = FALSE,
+  cluster_cols      = FALSE,
+  gaps_row = c(1:length(rownames(EGF_sign_prot_HM_mx)))[lapply(c(1:length(rownames(EGF_sign_prot_HM_mx))), "%%", 2) == 0],
+  filename = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/EGF_timecourse/4_Visualization/EGF_sign_HM.pdf",
+  width = 5,
+  height = 7
+)
+
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/EGF_timecourse/4_Visualization/EGF_sign_dendo.pdf", height = 5, width = 10)
+plot(cluster,which.plots=2, hang = -1)
+dev.off()
+```
+
+## Gene ontology analysis
+```{r message=FALSE, warning=FALSE, fig.height=8, fig.width=6.25}
+set.seed(3)
+#Run GO analysis on UVC data
+gp.res = gost(rownames(EGF_int_norm_vsn_both)[EGF_int_norm_vsn_both$int_sign == TRUE], organism = "hsapiens")
+
+#Take top 20 terms for each source
+gp.res <- gp.res$result %>% group_by(source) %>% dplyr::slice(1:10)
+gp.bp <- gp.res[gp.res$source %in% c("GO:BP", "GO:CC", "GO:MF"),]
+gp.bp$term_name <- factor(gp.bp$term_name, levels = unique(gp.bp$term_name))
+gp.bp$source <- factor(gp.bp$source, levels = unique(gp.bp$source))
+
+#Prepare the bubble plot
+ggplot(data = gp.bp, aes(x = source, y = term_name, color = -log10(p_value), size = intersection_size)) + 
+  geom_point() +
+  scale_color_viridis(option = "D") +
+  theme_bw() + 
+  ylab("") + 
+  xlab("") +
+  theme(axis.text.y = element_text(vjust = 1, hjust=1), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  scale_y_discrete(limits=rev)
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+# Save the bubble plot as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/EGF_timecourse/4_Visualization/GO_EGF_protein.pdf", height = 8, width = 6.25)
+ggplot(data = gp.bp, aes(x = source, y = term_name, color = -log10(p_value), size = intersection_size)) + 
+  geom_point() +
+  scale_color_viridis(option = "D") +
+  theme_bw() + 
+  ylab("") + 
+  xlab("") +
+  theme(axis.text.y = element_text(vjust = 1, hjust=1), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  scale_y_discrete(limits=rev)
+dev.off()
+```
+
+```{r warning=FALSE, results='hide'}
+#Get all results per time point
+colnames(EGF_int_norm_vsn_15low) <- str_c("15min_low_", colnames(EGF_int_norm_vsn_15low))
+colnames(EGF_int_norm_vsn_15high) <- str_c("15min_high_", colnames(EGF_int_norm_vsn_15high))
+colnames(EGF_int_norm_vsn_30low) <- str_c("30min_low_", colnames(EGF_int_norm_vsn_30low))
+colnames(EGF_int_norm_vsn_30high) <- str_c("30min_high_", colnames(EGF_int_norm_vsn_30high))
+colnames(EGF_int_norm_vsn_60low) <- str_c("60min_low_", colnames(EGF_int_norm_vsn_60low))
+colnames(EGF_int_norm_vsn_60high) <- str_c("60min_high_", colnames(EGF_int_norm_vsn_60high))
+
+merge.all <- function(x, ..., by = "row.names") {
+  L <- list(...)
+  for (i in seq_along(L)) {
+    x <- merge(x, L[[i]], by = by, all.x = TRUE)
+    rownames(x) <- x$Row.names
+    x$Row.names <- NULL
+  }
+  return(x)
+}
+
+all <- merge.all(EGF_int_norm_vsn_15low,EGF_int_norm_vsn_15high,EGF_int_norm_vsn_30low,EGF_int_norm_vsn_30high,EGF_int_norm_vsn_60low,EGF_int_norm_vsn_60high)
+write.table(all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/EGF_timecourse/3_DEP/EGF_TMT_contrast.txt", row.names = TRUE, sep = "\t")
+```
+
+All the visualizations were saved as pdf and modified in illustrator.
+
+```{r}
+sessionInfo()
+```
+
+
+

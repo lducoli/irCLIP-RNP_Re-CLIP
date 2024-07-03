@@ -1,0 +1,315 @@
+---
+title: "irCLIP-RNP dataset of CAPRIN1 during stress granule formation"
+author: "Luca Ducoli"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document: 
+    latex_engine: xelatex
+    pandoc_args: --listings
+    includes:
+      in_header: preamble.tex
+  html_document:
+    df_print: paged
+---
+
+This is the pipeline used to analyze the irCLIP-RNP of CAPRIN1 during stress granule formation from the whole RNP zone ranging from 70 to 350kDa. The experiment was performed in HEK293T. Three time points (0, 30, and 60min) were collected.
+
+# 1. Prepare the dataset 
+```{r warning=FALSE, message=FALSE}
+#Needed libraries
+library(DEP2)
+library(tidyverse)
+library(ggplot2)
+library(data.table)
+library(pheatmap)
+library(RColorBrewer)
+library(gplots)
+library(hrbrthemes)
+library(pacman)
+library(textshape)
+library(ggExtra)
+library(viridis)
+library(purrr)
+library(hexbin)
+library(DESeq2)
+library(ggpubr)
+library(UpSetR)
+library(dplyr)
+library(Clipper)
+library(factoextra)
+library(paletteer)
+library(corrplot)
+library(psych)
+library(ggpmisc)
+library(gprofiler2)
+library(viridis)
+library(GGally)
+library(igraph)
+library(rstatix)
+library(limma)
+library(HDMD)
+library(cluster)
+library(eulerr)
+```
+
+```{r warning=FALSE, message=FALSE}
+#Open proteinGroups.txt results from MaxQuant
+data <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/CAPRIN1_timecourse/0_Data/proteinGroups.txt")
+
+#Remove RPL proteins
+data <- data[-grep("RPL", data$Gene.names),]
+
+#Generate unique names and ids
+unique_pg <- make_unique(data, name = "Gene.names", ids = "Protein.IDs")
+unique_pg <- unique_pg %>% arrange(name)
+
+#Get the columns
+ecols <- grep("LFQ.intensity.", colnames(unique_pg))
+
+#Keep isoform with higher LFQ intensity
+iso <- grep("\\.\\d+$", unique_pg$name)
+rbp <- gsub("\\.1", "", c(unique_pg$name[iso]))
+
+#Find original row name of the isoform with higher intensity
+find_max_value <- function(rbp) {
+  filtered_df <- unique_pg[unique_pg$name %like% rbp, grep("LFQ.intensity.", colnames(unique_pg)) ]
+  filtered_df$rowSums <- rowSums(filtered_df[, grep("LFQ.intensity.", colnames(filtered_df))])
+  max_value <- which.max(filtered_df$rowSums)
+  rownames <- rownames(filtered_df)[-max_value]
+  return(rownames)
+}
+max_iso <- c(unlist(lapply(rbp, find_max_value)))
+
+#Remove low intensity isoforms
+unique_pg <- unique_pg[!(rownames(unique_pg) %in% max_iso),]
+```
+
+```{r warning=FALSE, message=FALSE}
+#Load design matrix
+design <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/CAPRIN1_timecourse/0_Data/Design.txt")
+design
+```
+
+# 2. Determine the UVC-erniched proteins
+We used ClippeR R package (PMID: 34635147) to determined the UVC-enriched proteins.
+```{r message=FALSE, warning=FALSE}
+#Create a SummarizedExperiment
+ecols <- grep("LFQ.intensity.", colnames(unique_pg))
+se <- make_se(unique_pg, columns = ecols, expdesign = design)
+se_UVC <- se[,se$crosslinking != "noUV" ]
+se_UVC <- filter_se(se_UVC, thr = 0, filter_formula = ~ Reverse != '+' & Potential.contaminant !="+" & Peptides > 1 & Unique.peptides > 0)
+se <- se[rownames(se) %in% rownames(se_UVC),]
+write.table(se@assays@data@listData, file="~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/CAPRIN1_timecourse/2_DEP/CAPRIN_LFQ_intensity_raw.txt", quote = F, row.names = T, sep = "\t")
+
+set.seed(3)
+clipper <- function(flt, time) {
+se_time <- flt[,flt$condition == time]
+se <- se[rownames(se_time), se$condition %in% c("noUV", time) ]
+imputed <- DEP2::impute(se, fun = "QRILC")
+data <- as.data.frame(assay(imputed))
+clipper = Clipper(score.exp = as.matrix(data[,c(2,3)]), score.back = as.matrix(data[,-c(2,3)]), FDR = 0.05, analysis = "e")
+data$FDR <- clipper$q
+data <- cbind(data, rowMeans(data[,c(2,3)])-data[1])
+data$TP <- time
+data$name <- rownames(data)
+rownames(data) <- NULL
+colnames(data)[5] <- c("logFC")
+deg <- subset(data, FDR < 0.1 & logFC > log2(3))
+return(list(data = data, deg = deg))
+}
+
+T0_clipper <-  clipper(se, "T0")
+T30_clipper <- clipper(se, "T30")
+T60_clipper <- clipper(se, "T60")
+
+write.table(T0_clipper$data, file="~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/CAPRIN1_timecourse/2_DEP/CAPRIN_clipper_results_T0.txt", quote = F, row.names = F, sep = "\t")
+write.table(T30_clipper$data, file="~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/CAPRIN1_timecourse/2_DEP/CAPRIN_clipper_results_T30.txt", quote = F, row.names = F, sep = "\t")
+write.table(T60_clipper$data, file="~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/CAPRIN1_timecourse/2_DEP/CAPRIN_clipper_results_T60.txt", quote = F, row.names = F, sep = "\t")
+
+CAPRIN_UVC <- rbind(T0_clipper$deg[,4:7], T30_clipper$deg[,4:7], T60_clipper$deg[,4:7])
+CAPRIN_UVC_genes <- unique(CAPRIN_UVC$name)
+CAPRIN_UVC
+```
+# 3. Differential enrichment analysis
+We performed differential enrichment analysis using Limma and generate the scatterplot.
+```{r message=FALSE, warning=FALSE}
+#Prepare the SummarizedExperiment
+norm <- normalize_vsn(se_UVC)
+imputed <- DEP2::impute(norm, fun = "QRILC")
+
+model_vsn <- model.matrix(~ condition, colData(imputed))
+
+#Interaction analysis
+CAPRIN1_fit1_norm_int_vsn = lmFit(assay(imputed), design = model_vsn)
+CAPRIN1_fit2_norm_int_vsn <- eBayes(CAPRIN1_fit1_norm_int_vsn)
+CAPRIN1_int_norm_vsn_both <- topTable(CAPRIN1_fit2_norm_int_vsn, coef = c("conditionT30","conditionT60"), number = length(rownames(imputed)))
+write.table(CAPRIN1_int_norm_vsn_both, file="~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/CAPRIN1_timecourse/2_DEP/CAPRIN_DEP_results_onefactor.txt", quote = F, row.names = T, sep = "\t")
+CAPRIN1_int_norm_vsn_T30 <- topTable(CAPRIN1_fit2_norm_int_vsn, coef = c("conditionT30"), number = length(rownames(imputed)))
+CAPRIN1_int_norm_vsn_T60 <- topTable(CAPRIN1_fit2_norm_int_vsn, coef = c("conditionT60"), number = length(rownames(imputed)))
+CAPRIN1_int_norm_vsn_both$name <- rownames(CAPRIN1_int_norm_vsn_both)
+CAPRIN1_int_norm_vsn_T30$name <- rownames(CAPRIN1_int_norm_vsn_T30)
+CAPRIN1_int_norm_vsn_T60$name <- rownames(CAPRIN1_int_norm_vsn_T60)
+CAPRIN1_sign_prot <- subset(CAPRIN1_int_norm_vsn_both, adj.P.Val < 0.1)
+CAPRIN1_sign_prot <- subset(CAPRIN1_sign_prot, abs(conditionT30) > 1 | abs(conditionT60) > 1)
+
+#Subset with the UVC proteins
+CAPRIN1_int_norm_vsn_both <- subset(CAPRIN1_int_norm_vsn_both, rownames(CAPRIN1_int_norm_vsn_both) %in% CAPRIN_UVC_genes)
+
+#Scatterplot
+CAPRIN1_int_norm_vsn_both$int_sign <- CAPRIN1_int_norm_vsn_both$name %in% rownames(CAPRIN1_sign_prot)
+CAPRIN1_colors <- c("FALSE" = "#999999","TRUE" =  "orange")
+```
+
+## Volcano plot
+```{r message=FALSE, warning=FALSE, fig.height=5, fig.width=5}
+ggplot <- ggplot(data=CAPRIN1_int_norm_vsn_both, aes(x=conditionT30, y=conditionT60)) + geom_vline(xintercept = 0) + geom_hline(yintercept = 0) +  geom_abline(intercept = 0, linetype=2) + 
+  geom_point(shape=19, size=2, aes(col = int_sign)) +
+  labs(title = paste("CAPRIN1 timecourse:", nrow(CAPRIN1_int_norm_vsn_both))  , x = expression("log2FC T30"), y = expression("log2FC T60")) +
+  scale_color_manual(values = CAPRIN1_colors) +
+  ggrepel::geom_text_repel(data = CAPRIN1_int_norm_vsn_both[CAPRIN1_int_norm_vsn_both$int_sign == "TRUE",], aes(label = name), size = 3, box.padding = unit(0.1, "lines"), point.padding = unit(0.1, "lines"), segment.size = 0.5,max.overlaps = Inf) + 
+  theme_bw() +
+  theme(legend.position = "none", panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_blank(),
+        plot.title = element_text(hjust = 0.5))# +
+
+ggplot
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+#Save the plot as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/CAPRIN1_timecourse/2_DEP/CAPRIN1_DEP_plot.pdf", height = 5, width = 5)
+ggplot
+dev.off()
+```
+
+# Heatmap of significant UVC-enriched proteins
+```{r message=FALSE, warning=FALSE, fig.height=5, fig.width=5}
+#Heatmap
+CAPRIN1_sign_T30 <- subset(CAPRIN1_int_norm_vsn_T30,  adj.P.Val < 0.1 & abs(logFC) > 1)
+CAPRIN1_sign_T60 <- subset(CAPRIN1_int_norm_vsn_T60,  adj.P.Val < 0.1 & abs(logFC) > 1)
+
+CAPRIN1_sign_T30 <- subset(CAPRIN1_sign_T30, rownames(CAPRIN1_sign_T30) %in% CAPRIN_UVC_genes)
+CAPRIN1_sign_T60 <- subset(CAPRIN1_sign_T60, rownames(CAPRIN1_sign_T60) %in% CAPRIN_UVC_genes)
+
+lt.tsk = list(T30 = rownames(CAPRIN1_sign_T30),
+              T60 = rownames(CAPRIN1_sign_T60))
+
+fromList <- function (input) {
+  # Same as original fromList()...
+  elements <- unique(unlist(input))
+  data <- unlist(lapply(input, function(x) {
+    x <- as.vector(match(elements, x))
+  }))
+  data[is.na(data)] <- as.integer(0)
+  data[data != 0] <- as.integer(1)
+  data <- data.frame(matrix(data, ncol = length(input), byrow = F))
+  data <- data[which(rowSums(data) != 0), ]
+  names(data) <- names(input)
+  # ... Except now it conserves your original value names!
+  row.names(data) <- elements
+  return(data)
+}
+
+#Get significant genes
+sign.proteins <- fromList(lt.tsk)
+
+#Matrix
+CAPRIN1_sign_prot_HM <- CAPRIN1_sign_prot[,c(1,2)]
+CAPRIN1_sign_prot_HM <- subset(CAPRIN1_sign_prot_HM, rownames(CAPRIN1_sign_prot_HM) %in% CAPRIN_UVC_genes)
+
+#Annotation and color
+my.breaks <- c(seq(-2.5, 2.5, by=0.01))
+my.colors <- c(rev(paletteer_c("ggthemes::Green-Blue-White Diverging", length(my.breaks))))
+
+labels <- sign.proteins
+colnames(labels) <- colnames(CAPRIN1_sign_prot_HM)
+labels[labels == 1] <- "*"
+labels[labels == 0] <- ""
+labels <- labels[match(rownames(CAPRIN1_sign_prot_HM), rownames(labels)),]
+
+pheatmap(
+  mat               = CAPRIN1_sign_prot_HM,
+  cellwidth = 12,
+  cellheight = 6,
+  display_numbers = labels,
+  fontsize_number=5.5,
+  color = my.colors,
+  breaks = my.breaks,
+  clustering_distance_cols = "euclidean",
+  show_colnames     = TRUE,
+  show_rownames     = TRUE,
+  drop_levels       = TRUE,
+  fontsize          = 5.5,
+  cluster_rows      = TRUE,
+  cluster_cols      = FALSE
+)
+```
+```{r message=FALSE, warning=FALSE, results='hide'}
+#Save the plot as pdf
+pheatmap(
+  mat               = CAPRIN1_sign_prot_HM,
+  cellwidth = 12,
+  cellheight = 6,
+  display_numbers = labels,
+  fontsize_number=5.5,
+  color = my.colors,
+  breaks = my.breaks,
+  clustering_distance_cols = "euclidean",
+  show_colnames     = TRUE,
+  show_rownames     = TRUE,
+  drop_levels       = TRUE,
+  fontsize          = 5.5,
+  cluster_rows      = TRUE,
+  cluster_cols      = FALSE,
+  filename = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/CAPRIN1_timecourse/2_DEP/CAPRIN1_sign_HM.pdf",
+  width = 5,
+  height = 5
+)
+```
+
+## Overlap with existing databases.
+```{r}
+#Load files
+res2 <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/CAPRIN1_timecourse/3_SG_Database/1_Venn_Diagram/MSGP_database_proteins.txt", header = TRUE, dec = ".")
+res3 <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/CAPRIN1_timecourse/3_SG_Database/1_Venn_Diagram/RNP_granule_database.txt", header = TRUE, dec = ".")
+
+s4 <- list(CAPRIN1 = CAPRIN_UVC_genes,
+           MSG = res2$Gene,
+           RNP = res3$Gene)
+
+fromList <- function (input) {
+  elements <- unique(unlist(input))
+  data <- unlist(lapply(input, function(x) {
+    x <- as.vector(match(elements, x))
+  }))
+  data[is.na(data)] <- as.integer(0)
+  data[data != 0] <- as.integer(1)
+  data <- data.frame(matrix(data, ncol = length(input), byrow = F))
+  data <- data[which(rowSums(data) != 0), ]
+  names(data) <- names(input)
+  row.names(data) <- elements
+  return(data)
+}
+
+sign.proteins <- fromList(s4)
+write.table(sign.proteins, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/CAPRIN1_timecourse/3_SG_Database/1_Venn_Diagram/CAPRIN1_upset_database.txt", row.names = TRUE, sep = "\t")
+
+plot(euler(s4, shape = "ellipse"), quantities = TRUE)
+```
+
+```{r}
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/CAPRIN1_timecourse/3_SG_Database/1_Venn_Diagram/CAPRIN1_MSGP_venn.pdf", height = 7, width = 7)
+plot(euler(s4, shape = "ellipse"), quantities = TRUE)
+dev.off()
+```
+
+All the visualizations were saved as pdf and modified in illustrator.
+
+```{r}
+sessionInfo()
+```
+
+
+
