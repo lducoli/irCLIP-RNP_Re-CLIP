@@ -1,0 +1,56 @@
+
+GENES = set([x.rstrip('\n') for x in open("gene.txt").readlines()])
+
+rule all:
+    input:
+        expand("matrix/{genes}_matrix.txt", genes=GENES),
+        expand("DEWSeq_results/{genes}_DEWseq_res_sum.rds", genes=GENES),
+        expand("DEWSeq_results/{genes}_DEWSeq_sign_regions_sum_categorization.txt", genes=GENES)
+
+rule htseqclip_creatematrix:
+    input:
+        "counts/{genes}/done"
+    output:
+        "matrix/{genes}_matrix.txt"
+    threads: 8
+    resources:
+        mem_mb = "64G"
+    params:
+        indir = "counts/{genes}"
+    shell:
+        "htseq-clip createMatrix --inputFolder {params.indir} --postfix txt --output {output}"
+
+rule DEWSeq_analysis:
+    input:
+        matrix= "matrix/{genes}_matrix.txt",
+        annotation= "annotation/annotation_mapToId.txt"
+    output:
+        rds= "DEWSeq_results/{genes}_DEWseq_res_sum.rds",
+        res1= "DEWSeq_results/{genes}_DEWSeq_sign_windows_sumvsinput.txt",
+        res2= "DEWSeq_results/{genes}_DEWSeq_sign_regions_sumvsinput.txt"
+    threads: 8
+    resources:
+        mem_mb = "64G"
+    params:
+        outdir="DEWSeq_results/",
+        padj = 0.05,
+        logfc = 1
+    script:
+        "scripts/DEWSeq_sum_script.R"
+
+rule Regions:
+    input:
+        window= "DEWSeq_results/{genes}_DEWSeq_sign_windows_sumvsinput.txt",
+        region= "DEWSeq_results/{genes}_DEWSeq_sign_regions_sumvsinput.txt",
+        ddw= "DEWSeq_results_subzone/{genes}_DEWseq_res.rds"
+    output:
+        res1= "DEWSeq_results/{genes}_DEWSeq_sign_regions_sum_categorization.txt"
+    threads: 8
+    resources:
+        mem_mb = "64G"
+    params:
+        outdir="DEWSeq_results/"
+    script:
+        "scripts/Categorization_sum_script.R"
+
+

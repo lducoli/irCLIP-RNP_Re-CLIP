@@ -1,0 +1,24 @@
+name: htseqclip-snakemake
+channels:
+  - conda-forge
+  - defaults
+  - bioconda
+dependencies:
+  - snakemake
+  - pysam
+  - HTSeq
+  - r-base
+  - r-essentials
+  - r-tidyverse
+  - r-data.table
+  - bioconductor-ihw
+  - bioconductor-dewseq
+  - pandas
+  - scipy
+  - numpy
+  - samtools
+  - bedtools
+  - python-graphviz
+  - pip
+  - pip:
+    - htseq-clip
