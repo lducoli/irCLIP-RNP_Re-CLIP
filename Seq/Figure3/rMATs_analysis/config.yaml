@@ -1,0 +1,16 @@
+
+name: 'supir'
+SAMPLE_TABLE: 'samplesSubset.txt'
+BAM_DIR: "star/transcriptomes"
+comparisons: 
+        - ["cherp", "ctrl"]
+        - ["csde1", "ctrl"]
+        - ["hnrnpc", "ctrl"]
+        - ["rnpul1", "ctrl"]
+        - ["upf1", "ctrl"]
+GTF: "/oak/stanford/groups/khavari/users/dfporter/seq/genomes/gencode_39_primary_files/gencode.v39.annotation.gtf"
+GENOME_FA: "/oak/stanford/groups/khavari/users/dfporter/seq/genomes/gencode_39_primary_files/GRCh38.primary_assembly.genome.fa"
+# These are created if they don't exist:
+RSEM_REF: "gencode39_rsem_reference/gencode39_rsem_reference"
+RSEM_COUNTS_DIR: "data/rsem_counts"
+

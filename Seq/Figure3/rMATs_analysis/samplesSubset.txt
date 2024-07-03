@@ -1,0 +1,13 @@
+sample	group
+cherp_1h_1	cherp
+cherp_1h_2	cherp
+csde1_1h_1	csde1
+csde1_1h_2	csde1
+ctrl_1h_1	ctrl
+ctrl_1h_2	ctrl
+hnrnpc_1h_1	hnrnpc
+hnrnpc_1h_2	hnrnpc
+rnpul1_1h_1	rnpul1
+rnpul1_1h_2	rnpul1
+upf1_1h_1	upf1
+upf1_1h_2	upf1
