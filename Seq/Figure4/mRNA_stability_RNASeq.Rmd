@@ -1,0 +1,315 @@
+---
+title: "mRNA stability assay after HNRNPC and UPF1 knockdown at 1h EGF stimulation"
+author: "Luca Ducoli"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document: 
+    latex_engine: xelatex
+    pandoc_args: --listings
+    includes:
+      in_header: preamble.tex
+  html_document:
+    df_print: paged
+---
+
+This is the pipeline used to analyze the alternative splicing events which are regulated by HNRNPC and UPF1 during EGF stimulation.
+
+# 1. PCA plot of mRNA stability data
+First, we looked at PCA plots to evaluate the distribution of our samples.
+```{r warning=FALSE, message=FALSE}
+#Needed libraries
+library(tidyr)
+library(dplyr)
+library(tximportData)
+library(GenomicFeatures)
+library(tximport)
+library(SummarizedExperiment)
+library(tximeta)
+library(fishpond)
+library(org.Hs.eg.db)
+library(ggfortify)
+library(ggpubr)
+library(ggrepel)
+library(RColorBrewer)
+library(pheatmap)
+library(viridis)
+library(broom)
+library(PKNCA)
+library(ggpubr)
+library(limma)
+library(DEP)
+library(DESeq2)
+library(EnsDb.Hsapiens.v86)
+library(ggpmisc)
+library(ggExtra)
+library(MASS)
+```
+
+```{r warning=FALSE, message=FALSE, fig.width=4, fig.height=4}
+#Load salmon quant data for control with --numGibbsSamples 20 
+setwd("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/4_mRNA_stability_assay/4_DTE_timecourse/Analysis/0_PCA_eachTP")
+
+#Sample names
+sample_ctrl <- c("d0_ctrl1_quant", "d0_ctrl2_quant", "d1_ctrl1_quant", "d1_ctrl2_quant","d3_ctrl1_quant", "d3_ctrl2_quant","d4_ctrl1_quant", "d4_ctrl2_quant")
+sample_HNRNPCKD <- c("d0_hn1_quant", "d0_hn2_quant", "d1_hn1_quant", "d1_hn2_quant","d3_hn1_quant", "d3_hn2_quant", "d4_hn1_quant", "d4_hn2_quant")
+sample_UPF1KD <- c("d0_up1_quant", "d0_up2_quant", "d1_up1_quant", "d1_up2_quant","d3_up1_quant", "d3_up2_quant", "d4_up1_quant", "d4_up2_quant")
+
+dir <- "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/4_mRNA_stability_assay/4_DTE_timecourse/Salmon_20/counts"
+
+PCA_plot <- function(sample, type) {
+  cat("Create colData\n")
+  coldata <- data.frame(condition = factor(rep(c("D0", "D1", "D3", "D4"), each = 2)), repl = factor(rep(c("1","2"),4)))
+  coldata$names <- sample
+  coldata$files <- file.path(dir, coldata$names, "quant.sf")
+  all(file.exists(coldata$files))
+  
+  cat("Create Summarized exp\n")
+  se <- tximeta(coldata, skipMeta = TRUE, skipSeqinfo = TRUE)
+  se <- scaleInfReps(se)
+  se <- labelKeep(se)
+  se <- se[mcols(se)$keep,]
+  scaled_counts <- (se@assays@data$infRep1+se@assays@data$infRep2+se@assays@data$infRep3+se@assays@data$infRep4+se@assays@data$infRep5
+                    +se@assays@data$infRep6+se@assays@data$infRep7+se@assays@data$infRep8+se@assays@data$infRep9+se@assays@data$infRep10
+                    +se@assays@data$infRep11+se@assays@data$infRep12+se@assays@data$infRep13+se@assays@data$infRep14+se@assays@data$infRep15
+                    +se@assays@data$infRep16+se@assays@data$infRep17+se@assays@data$infRep18+se@assays@data$infRep19+se@assays@data$infRep20)/20
+  write.table(scaled_counts, file = paste("Count_table_", type, ".txt", sep = ""), quote = FALSE, sep = "\t", row.names = TRUE) 
+
+  cat("Generate PCA\n")
+  pca_res <- prcomp(t(scaled_counts))
+  
+  psi.pca.pc <- data.frame(pca_res$x, sample = colnames(scaled_counts)) %>%
+    mutate(., condition = paste(rep(type, 8), c('D0 R1', 'D0 R2', "D1 R1", "D1 R2", "D3 R1", "D3 R2","D4 R1", "D4 R2"), sep = "-"))
+  
+  psi.pca.summary <- summary(pca_res)$importance
+  pc1var = round(psi.pca.summary[2,1] * 100, 1)
+  pc2var = round(psi.pca.summary[2,2] * 100, 1)
+  
+  colors <- brewer.pal(8, 'Set1')
+  
+  PCA <- ggplot(psi.pca.pc, aes(x = PC1, y = PC2, color = condition)) + geom_point(size = 5)  +
+    scale_color_manual(values = colors) + theme_linedraw() + xlab(paste('PC1,', pc1var, '% explained var.')) +
+    ylab(paste('PC2,', pc2var, '% explained var.')) + theme(legend.position = "none") + geom_text_repel(aes(label = condition), box.padding = 0.5)
+  
+  return(list(se = se, PCA = PCA, scaled_counts = scaled_counts ))
+}
+
+Control <- PCA_plot(sample_ctrl, "Ctrl")
+HNRNPCKD <- PCA_plot(sample_HNRNPCKD, "HNRNPC-KD")
+UPF1KD <- PCA_plot(sample_UPF1KD, "UPF1-KD")
+
+Control$PCA
+HNRNPCKD$PCA
+UPF1KD$PCA
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+#Save the plot as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/4_mRNA_stability_assay/4_DTE_timecourse/Analysis/0_PCA_eachTP/PCA_mRNAstab.pdf")
+Control$PCA
+HNRNPCKD$PCA
+UPF1KD$PCA
+dev.off()
+```
+
+# 2. Differential stability (DS) analysis against control samples
+This analysis is to determine the transcripts that shows disregulated stability compared to control siRNAs.
+```{r message=FALSE, warning=FALSE}
+#Load annotation
+txdb <- loadDb("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/8_DTE_analysis/0_UPF1_HNRNPC/1_DTE/Genome/gencode.v39.annotation.sqlite")
+k <- keys(txdb, keytype = "TXNAME")
+tx2gene <- AnnotationDbi::select(txdb, k, "GENEID", "TXNAME")
+tx2gene$geneID <- gsub("\\..*", "", tx2gene$GENEID)
+geneIDs1 <- ensembldb::select(EnsDb.Hsapiens.v86, keys= tx2gene$geneID, keytype = "GENEID", columns = c("SYMBOL","GENEID"))
+colnames(geneIDs1)[2] <- "geneID"
+tx2gene <- merge(tx2gene, geneIDs1, by = "geneID", all.x = TRUE)
+write.table(tx2gene, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/4_mRNA_stability_assay/4_DTE_timecourse/Analysis/1_DTE/Annotation_transcripts_genes.txt", quote = FALSE, sep = "\t", row.names = FALSE)
+```
+
+## Regression analysis of DS AS transcripts
+```{r message=FALSE, warning=FALSE, fig.height=20, fig.width=10}
+#Load the expression table
+control.expr <- as.data.frame(Control$scaled_counts)
+control.expr$TXid <- rownames(control.expr)
+rownames(control.expr) <- NULL
+control.expr <- control.expr[,c(9,1:8)]
+
+hnrnpc.expr <- as.data.frame(HNRNPCKD$scaled_counts)
+hnrnpc.expr$TXid <- rownames(hnrnpc.expr)
+rownames(hnrnpc.expr) <- NULL
+
+upf1.expr <- as.data.frame(UPF1KD$scaled_counts)
+upf1.expr$TXid <- rownames(upf1.expr)
+rownames(upf1.expr) <- NULL
+
+#Merge scaled 
+mrna.stap.expr <- merge(control.expr,hnrnpc.expr, by="TXid")
+mrna.stap.expr <- merge(mrna.stap.expr,upf1.expr, by="TXid")
+
+DTE.high.expr2 <- mrna.stap.expr
+
+#Limma
+design <- read.delim("/Users/lducoli/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/4_mRNA_stability_assay/4_DTE_timecourse/Analysis/1_DTE/0_design.txt")
+
+colnames(DTE.high.expr2)[1] <- "name"
+DTE.high.expr2$ID <- 1:length(rownames(DTE.high.expr2))
+columns <- c(grep("d\\d+", colnames(DTE.high.expr2)))
+mrnastab_se <- make_se(DTE.high.expr2, columns, design)
+
+model <- model.matrix(~ time + time:rbp, colData(mrnastab_se))
+mrnastab_fit1_int = lmFit(assay(mrnastab_se), design = model)
+mrnastab_fit2_int <- eBayes(mrnastab_fit1_int)
+mrnastab_int_res <- topTable(mrnastab_fit2_int, coef = c("timeT1:rbphnrnpc", "timeT3:rbphnrnpc", "timeT4:rbphnrnpc"), number = length(rownames(mrnastab_se)))
+mrnastab_int_res2 <- topTable(mrnastab_fit2_int, coef = c("timeT1:rbpupf1", "timeT3:rbpupf1", "timeT4:rbpupf1"), number = length(rownames(mrnastab_se)))
+write.table(mrnastab_int_res, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/4_mRNA_stability_assay/4_DTE_timecourse/Analysis/1_DTE/HNRNPC_Limma_results.txt", row.names = TRUE, quote = FALSE, sep = "\t")
+write.table(mrnastab_int_res2, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/4_mRNA_stability_assay/4_DTE_timecourse/Analysis/1_DTE/UPF1_Limma_results.txt", row.names = TRUE, quote = FALSE, sep = "\t")
+
+#Max FC
+mrnastab_int_res$max_lfc <- pmax(mrnastab_int_res$timeT1.rbphnrnpc,mrnastab_int_res$timeT3.rbphnrnpc, mrnastab_int_res$timeT4.rbphnrnpc)
+mrnastab_int_res$min_lfc <- pmin(mrnastab_int_res$timeT1.rbphnrnpc,mrnastab_int_res$timeT3.rbphnrnpc, mrnastab_int_res$timeT4.rbphnrnpc)
+mrnastab_int_res$max_lfc_all <- ifelse(abs(mrnastab_int_res$max_lfc) > abs(mrnastab_int_res$min_lfc),  mrnastab_int_res$max_lfc, mrnastab_int_res$min_lfc)
+mrnastab_int_res$TXNAME <- rownames(mrnastab_int_res)
+
+mrnastab_int_res2$max_lfc <- pmax(mrnastab_int_res2$timeT1.rbpupf1,mrnastab_int_res2$timeT3.rbpupf1, mrnastab_int_res2$timeT4.rbpupf1)
+mrnastab_int_res2$min_lfc <- pmin(mrnastab_int_res2$timeT1.rbpupf1,mrnastab_int_res2$timeT3.rbpupf1, mrnastab_int_res2$timeT4.rbpupf1)
+mrnastab_int_res2$max_lfc_all <- ifelse(abs(mrnastab_int_res2$max_lfc) > abs(mrnastab_int_res2$min_lfc),  mrnastab_int_res2$max_lfc, mrnastab_int_res2$min_lfc)
+mrnastab_int_res2$TXNAME <- rownames(mrnastab_int_res2)
+
+#Prepare DTE results
+logfc.hnrnpc <- mrnastab_int_res %>% dplyr::select(TXNAME, max_lfc_all, adj.P.Val)
+logfc.upf1 <- mrnastab_int_res2 %>% dplyr::select(TXNAME, max_lfc_all, adj.P.Val)
+
+colnames(logfc.hnrnpc) <- c("TX_id", "hnrnpc_logfc", "hnrnpc_adjpval")
+colnames(logfc.upf1) <- c("TX_id", "upf1_logfc", "upf1_adjpval")
+
+logfc.table.vsupf1 <- merge(logfc.hnrnpc, logfc.upf1, by = "TX_id")
+logfc.table.vsupf1.sign <- subset(logfc.table.vsupf1, hnrnpc_adjpval < 0.05 & upf1_adjpval < 0.05)
+
+#Merge logfc table with rMATs transcript
+DTE.high <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/8_DTE_analysis/0_UPF1_HNRNPC/1_DTE/AS_HNRNPC_UPF1_transcripts.txt", header = TRUE)
+
+as.tr.fc <- merge(logfc.table.vsupf1.sign, unique(DTE.high %>% dplyr::select(TX_id, TX_geneID, AS_event)), by = "TX_id")
+write.table(as.tr.fc, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/4_mRNA_stability_assay/4_DTE_timecourse/Analysis/1_DTE/Limma_sign_transcript_upset.txt", row.names = TRUE, quote = FALSE, sep = "\t")
+
+#Regression analysis
+all <- setdiff(logfc.table.vsupf1.sign$TX_id, as.tr.fc$TX_id)
+logfc.table.vsupf1.sign2 <- subset(logfc.table.vsupf1.sign, TX_id %in% all)
+logfc.table.vsupf1.sign2$AS_event <- "general"
+logfc.table.vsupf1.sign2$type <- "general"
+
+as.tr.fc.plot <- as.tr.fc
+as.tr.fc.plot$type <- "AS_event"
+
+model <- rlm(upf1_logfc ~ hnrnpc_logfc, data = logfc.table.vsupf1.sign2)
+model2 <- rlm(upf1_logfc ~ hnrnpc_logfc, data = as.tr.fc.plot)
+
+rlm_rsquare <- function(model) {
+# Extract the weights and residuals
+weights <- model$w
+residuals <- model$resid
+fitted_values <- model$fitted.values
+response <- logfc.table.vsupf1.sign2$upf1_logfc
+
+# Calculate the weighted sum of squares
+weighted_ss_residuals <- sum(weights * residuals^2)
+weighted_ss_total <- sum(weights * (response - mean(response))^2)
+
+# Calculate the weighted R-squared
+weighted_r_squared <- 1 - (weighted_ss_residuals / weighted_ss_total)
+
+return(weighted_r_squared)
+}
+model.rsquare <- rlm_rsquare(model)
+model2.rsquare <- rlm_rsquare(model2)
+
+chow.test <- gap::chow.test(y1=logfc.table.vsupf1.sign2$upf1_logfc,x1=logfc.table.vsupf1.sign2$hnrnpc_logfc,y2=as.tr.fc.plot$upf1_logfc,x2=as.tr.fc.plot$hnrnpc_logfc)
+model.res <- data.frame(general = model.rsquare, AS_event = model2.rsquare, chow.pvalue = chow.test[[4]])
+write.table(model.res, "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/4_mRNA_stability_assay/4_DTE_timecourse/Analysis/1_DTE/Chowtest_allASevents.txt", quote = F, sep = "\t")
+
+as.tr.fc.plot <- rbind(logfc.table.vsupf1.sign2, as.tr.fc.plot %>% dplyr::select(-TX_geneID))
+as.tr.fc.plot$AS_event <- factor(as.tr.fc.plot$AS_event)
+
+#Generate the scatter plot
+ggplot3 <- ggplot(data=as.tr.fc.plot, aes(x=hnrnpc_logfc, y=upf1_logfc, group=type)) + 
+  geom_point(aes(color = AS_event, size = AS_event)) +
+  scale_size_manual(values=c(1.5,1.5,0.5,1.5,1.5,1.5))+
+  geom_smooth(aes(group=type, color=type), method='rlm', formula= y~x, size=0.5, fullrange=TRUE) +
+  scale_color_manual(values = c(A3SS = "#7959b7", A5SS = "#00b7e6", general = "grey", MXE = "#ff955e", RI = "#f25a5f", SE = "#4487ab")) +
+  annotate(geom="text", x=-5, y=6, label=round(model.rsquare,2), color="black") +
+  annotate(geom="text", x=-5, y=5.5, label=round(model2.rsquare,3), color="#f25a5f") +
+  xlim(-8, 8) +
+  ylim(-8, 8) +
+  theme_linedraw() + theme(panel.grid.major = element_blank(), legend.position = "bottom", 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_blank()) + ggtitle("Correlation of DS common HNRNPC-KD/UPF1-KD AS transcripts")
+ggplot3 <- ggMarginal(ggplot3, groupColour = TRUE, groupFill = TRUE, type="density", alpha=0.6, size = 5)
+```
+
+```{r  warning=FALSE, message=FALSE, fig.height=6, fig.width=5}
+ggplot3
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+#Save the plot as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/4_mRNA_stability_assay/4_DTE_timecourse/Analysis/1_DTE/Regression_DST_HNRNPC_UPF1.pdf", height = 6, width = 5)
+ggplot3
+dev.off()
+```
+
+## Cumulative fraction of DS AS transcripts
+```{r warning=FALSE, message=FALSE, fig.height=5, fig.width=9}
+as.tr.fc.cdf <- as.tr.fc.plot %>% dplyr::select(TX_id, hnrnpc_logfc, AS_event) %>% dplyr::rename(logfc = hnrnpc_logfc)
+as.tr.fc.cdf$rbp <- "HNRNPC-KD"
+
+as.tr.fc.cdf2 <- as.tr.fc.plot %>% dplyr::select(TX_id, upf1_logfc, AS_event) %>% dplyr::rename(logfc = upf1_logfc)
+as.tr.fc.cdf2$rbp <- "UPF1-KD"
+
+as.tr.fc.cdf <- rbind(as.tr.fc.cdf, as.tr.fc.cdf2)
+
+cdf <- ggplot(data=as.tr.fc.cdf, aes(x=logfc, group=AS_event, colour=AS_event)) +
+  stat_ecdf() +
+  ggtitle("Cumulative fraction of DS common HNRNPC-KD/UPF1-KD AS transcripts") +
+  scale_color_manual(values = c(A3SS = "#7959b7", A5SS = "#00b7e6", general = "grey", MXE = "#ff955e", RI = "#f25a5f", SE = "#4487ab")) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_blank(),
+        plot.title = element_text(hjust = 0.5)) + facet_grid(cols=vars(rbp))
+
+cdf
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+#Save the plot as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/4_mRNA_stability_assay/4_DTE_timecourse/Analysis/1_DTE/ECDF_DST_HNRNPC_UPF1.pdf", height = 5, width = 9)
+cdf
+dev.off()
+```
+
+```{r warning=FALSE, message=FALSE}
+#KS test
+hnrncp.kstest <- data.frame( ks.pvalue =  c(ks.test(as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "general" & as.tr.fc.cdf$rbp == "HNRNPC-KD"], as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "RI" & as.tr.fc.cdf$rbp == "HNRNPC-KD"] , alternative = 'greater')[["p.value"]], 
+              ks.test(as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "general" & as.tr.fc.cdf$rbp == "HNRNPC-KD"], as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "A3SS" & as.tr.fc.cdf$rbp == "HNRNPC-KD"] , alternative = 'greater')[["p.value"]],
+              ks.test(as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "general" & as.tr.fc.cdf$rbp == "HNRNPC-KD"], as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "A5SS" & as.tr.fc.cdf$rbp == "HNRNPC-KD"] , alternative = 'greater')[["p.value"]], 
+              ks.test(as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "general" & as.tr.fc.cdf$rbp == "HNRNPC-KD"], as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "SE" & as.tr.fc.cdf$rbp == "HNRNPC-KD"] , alternative = 'greater')[["p.value"]], 
+              ks.test(as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "general" & as.tr.fc.cdf$rbp == "HNRNPC-KD"], as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "MXE" & as.tr.fc.cdf$rbp == "HNRNPC-KD"] , alternative = 'greater')[["p.value"]]), type = c("RI", "A3SS", "A5SS", "SE", "MXE"))
+
+UPF1.kstest <- data.frame( ks.pvalue =  c(ks.test(as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "general" & as.tr.fc.cdf$rbp == "UPF1-KD"], as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "RI" & as.tr.fc.cdf$rbp == "UPF1-KD"] , alternative = 'greater')[["p.value"]], 
+              ks.test(as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "general" & as.tr.fc.cdf$rbp == "UPF1-KD"], as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "A3SS" & as.tr.fc.cdf$rbp == "UPF1-KD"] , alternative = 'greater')[["p.value"]],
+              ks.test(as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "general" & as.tr.fc.cdf$rbp == "UPF1-KD"], as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "A5SS" & as.tr.fc.cdf$rbp == "UPF1-KD"] , alternative = 'greater')[["p.value"]], 
+              ks.test(as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "general" & as.tr.fc.cdf$rbp == "UPF1-KD"], as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "SE" & as.tr.fc.cdf$rbp == "UPF1-KD"] , alternative = 'greater')[["p.value"]], 
+              ks.test(as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "general" & as.tr.fc.cdf$rbp == "UPF1-KD"], as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "MXE" & as.tr.fc.cdf$rbp == "UPF1-KD"] , alternative = 'greater')[["p.value"]]), type = c("RI", "A3SS", "A5SS", "SE", "MXE"))
+
+hnrncp.kstest
+UPF1.kstest
+```
+
+All the visualizations were saved as pdf and modified in illustrator.
+
+```{r}
+sessionInfo()
+```
+
+
+
