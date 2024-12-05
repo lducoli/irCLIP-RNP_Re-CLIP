@@ -1,0 +1,792 @@
+---
+title: "Characterization of AS events in irCLIPv2 and Re-CLIP dataset from EGF timecourse for HNRNPC and UPF1"
+author: "Luca Ducoli"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: 
+    latex_engine: xelatex
+    pandoc_args: --listings
+    includes:
+      in_header: preamble.tex
+---
+
+This is the pipeline used to analyze the irCLIPv2 and Re-CLIP datasets of UPF1 and HNRNPC from EGF time course. HNRNPC and UPF1 irCLIPv2 was performed at 0, 15, 30, and 60min EGF stimulation. HNRNPC and UPF1 irCLIPv2 after the knockdown of the UPF1 and HNRNPC were performed at 0 and 60min EGF stimulation. HNRNPC-UPF1 Re-CLIP was performed at 0, 30, 60min EGF stimualtion. The experiments were performed in duplicates for each time point in A431 cells.
+
+# 1. Characterization of AS events
+```{r warning=FALSE, message=FALSE}
+library(tidyverse)
+library(Repitools)
+library(AnnotationHub)
+library(AnnotationDbi)
+library(ggplot2)
+library(plyranges)
+library(GenomicRanges)
+library(gintools)
+library(rtracklayer)
+library(EnrichedHeatmap)
+library(circlize)
+library(caTools)
+library(cliProfiler)
+library(paletteer)
+library(gridExtra)
+library(NbClust)
+library(RColorBrewer)
+library(ChIPpeakAnno)
+library(data.table) 
+library(BRGenomics)
+library(DESeq2)
+library(ggpmisc)
+library(eulerr)
+library(memes)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(universalmotif)
+library(SLIMFinderR)
+library(ggraph)
+library(plyr)
+library(ggpubr)
+```
+
+```{r message=FALSE, warning=FALSE}
+#Get transcript names from rMATs output
+gtf <- rtracklayer::import('~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/8_DTE_analysis/0_UPF1_HNRNPC/1_DTE/Genome/gencode.v39.annotation.gtf')
+gtf_df=as.data.frame(gtf)
+
+AS_event <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/8_DTE_analysis/0_UPF1_HNRNPC/0_Overlap/HNRNPC_UPF1_ASevents.txt", header = TRUE)
+AS_event <- AS_event %>% mutate("gene_id" = sapply(strsplit(AS_event$region, "_"), function(x) x[1]),
+                                "gene_name"= sapply(strsplit(AS_event$region, "_"), function(x) x[2]), 
+                                "chr"= sapply(strsplit(AS_event$region, "_"), function(x) x[3]),
+                                "strand"= sapply(strsplit(AS_event$region, "_"), function(x) x[4]), 
+                                "start" = sapply(strsplit(AS_event$region, "_"), function(x) x[5]),
+                                "end"= sapply(strsplit(AS_event$region, "_"), function(x) x[6])) %>% dplyr::select(c(region,chr,start,end, strand, gene_id, gene_name, AS))
+
+gene.info <- read.delim("/Users/lducoli/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/4_EGF_tc/0_Annotation/0_F6_CAT.gene.info.tsv.txt", header = TRUE)
+
+AS_event$geneID <- gsub("\\..*", "", AS_event$gene_id)
+AS_event <- merge(AS_event, gene.info[,1:4], by = "geneID", all.x = TRUE)
+AS_event$CAT_geneClass[AS_event$geneID %in% c("ENSG00000273559", "ENSG00000183793", "ENSG00000183889",
+                                              "ENSG00000241322", "ENSG00000261740", "ENSG00000265190", "ENSG00000265354", "ENSG00000265808",
+                                              "ENSG00000269335", "ENSG00000270647", "ENSG00000277149", "ENSG00000277791", "ENSG00000278540",
+                                              "ENSG00000283228", "ENSG00000284626", "ENSG00000284770", "ENSG00000285106", "ENSG00000285130",
+                                              "ENSG00000286001", "ENSG00000286192", "ENSG00000288683")] <- "coding_mRNA"
+AS_event$CAT_geneClass[AS_event$geneID == "ENSG00000288663"] <- "lncRNA_sense_intronic"
+AS_event$CAT_geneClass[AS_event$geneID %in% c("ENSG00000224817", "ENSG00000230724", "ENSG00000250920", "ENSG00000255052", "ENSG00000268460",
+                                              "ENSG00000275464", "ENSG00000285756")] <- "lncRNA_intergenic"
+AS_event$CAT_geneClass[AS_event$geneID %in% c("ENSG00000225151", "ENSG00000226210", "ENSG00000244306", "ENSG00000276291", 
+                                              "ENSG00000286156")] <- "pseudogene"
+
+#Pie Chart
+regionRes <- unique(AS_event %>% dplyr::select(geneID, CAT_geneClass)) %>% dplyr::count(CAT_geneClass)
+regionRes$AS <- factor(regionRes$CAT_geneClass)
+
+regionRes <- regionRes %>% 
+  arrange(desc(AS)) %>%
+  mutate(prop = round((n / sum(regionRes$n))*100,1)) %>%
+  mutate(ypos = cumsum(prop)- 0.5*prop )
+
+piechart <- ggplot(regionRes, aes(x="", y=prop, fill=AS))+ geom_bar(width = 1, stat = "identity") +
+    coord_polar("y", start=0) +
+  theme_minimal()+
+  theme(
+  axis.title.x = element_blank(),
+  axis.title.y = element_blank(),
+  panel.border = element_blank(),
+  panel.grid=element_blank(),
+  axis.ticks = element_blank(),
+  plot.title=element_text(size=14, face="bold")
+  )+
+  theme(axis.text.x=element_blank()) +
+  geom_text(aes(y = ypos, label = prop), color = "black", size=2)
+
+piechart
+
+#Subset to protein coding
+AS_event <- subset(AS_event, CAT_geneClass == "coding_mRNA")
+write.table(AS_event, "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/4_EGF_tc/4_Visualization/1_Distribution/PC_AS_events.txt", quote = F, sep = "\t")
+
+#Pie chart genomic regions
+region.gr <- GRanges(AS_event[,grep("chr", colnames(AS_event))], IRanges(start=as.numeric(AS_event[,grep("start", colnames(AS_event))]), end=as.numeric(AS_event[,grep("end", colnames(AS_event))]),  names = AS_event[,grep("region", colnames(AS_event))]), strand = AS_event[,grep("strand", colnames(AS_event))], AS_event = AS_event[,grep("AS", colnames(AS_event))])
+
+txdb <- loadDb("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/1_Subzones/0_Annotation/gencode.v39.annotation")
+
+dist <- genomicElementDistribution(region.gr, TxDb = txdb, promoterRegion=c(upstream=0, downstream=0), geneDownstream=c(upstream=0, downstream=0), ignore.strand = FALSE, plot = FALSE)
+
+region_anno <- as.data.frame(mcols(dist$peaks))
+region_anno$Exons <- ifelse(region_anno$Exons == "otherExon", "CDS", region_anno$Exons)
+regionRes2 <- region_anno %>% group_by(AS_event) %>% dplyr::count(Exons)
+regionRes2$AS <- factor(regionRes2$Exons)
+regionRes2$AS <- factor(regionRes2$AS, levels = c("utr5", "CDS", "utr3"))
+regionRes2$AS_event <- factor(regionRes2$AS_event, levels = c("A5SS", "A3SS", "MXE", "SE", "RI"))
+
+stacked <- ggplot(regionRes2, aes(fill=AS, y=n, x=AS_event)) + 
+    geom_bar(position="fill", stat="identity") +
+      scale_fill_viridis(discrete = T) +
+    theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.line = element_blank())+
+    xlab("") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+stacked
+
+#Get the transcripts
+AS_event_tx <- merge(AS_event %>% dplyr::select(region,gene_id,AS), gtf_df[gtf_df$type == "transcript",], by = "gene_id") %>% dplyr::select(c(seqnames,start,end,transcript_id, strand, gene_id, gene_name, AS))
+
+AS_event_bed <- AS_event %>% dplyr::select(chr, start, end, strand, region, gene_id, AS)
+AS_event_tx_bed <- AS_event_tx %>% dplyr::select(seqnames, start, end, strand, transcript_id, gene_id)
+
+#bedtools to get regions inside transcripts
+AS_event_tx2 <- bedtoolsr::bt.intersect(AS_event_bed, AS_event_tx_bed, loj = TRUE)
+AS_event_tx2 <- unique(AS_event_tx2)
+
+colnames(AS_event_tx2) <- c("AS_chr", "AS_start", "AS_end", "AS_strand", "AS_region", "AS_geneID", "AS_event", "TX_chr", "TX_start", "TX_end", "TX_strand", "TX_id", "TX_geneID")
+AS_event_tx2 <- AS_event_tx2 %>% mutate(geneIDmatch = case_when(AS_geneID != TX_geneID  ~ "0",AS_geneID == TX_geneID ~ "1"))
+AS_event_tx2 <- subset(AS_event_tx2, geneIDmatch > 0)
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+# Save the plot as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/4_EGF_tc/4_Visualization/1_Distribution/Piechart_anno_HNRNPC_UPF1_AS_region.pdf",  height=5, width=5)
+piechart
+dev.off()
+
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/4_EGF_tc/4_Visualization/1_Distribution/Stacked_anno_HNRNPC_UPF1_AS_region.pdf",  height=5, width=3)
+stacked
+dev.off()
+```
+# 2. Check the distribution of RT stops for HNRNPC and UPF1 and re-CLIP data
+##Percentage across AS events
+In order to identify where on the AS transcripts the co-binding events between UPF1 and HNRNPC are happening, we analyzed first the percentage of the RT stop location across several genomic features (5'UTR, exon, intron, 3'UTR).
+```{r message=FALSE, warning=FALSE, fig.height=3, fig.width=5}
+#Get annotation
+gff_anno <- rtracklayer::import.gff3('~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/0_Annotation/gencode.v39.annotation.gff3')
+
+#Get normalized bigwigfiles
+egf_granges <- function(rbp, tp) {
+setwd("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/4_EGF_tc/3_Bigwig_sum")
+bw.p <- rtracklayer::import.bw(paste(rbp, "A431", tp, "merged.p.scaleddewseq.bw", sep = "_"))
+bw.m <- rtracklayer::import.bw(paste(rbp, "A431", tp, "merged.m.scaleddewseq.bw", sep = "_"))
+
+strand(bw.p) <- "+"
+strand(bw.m) <- "-"
+
+bw <- bind_ranges(bw.p, bw.m)
+bw$timepoint <- gsub("_HMW", "", tp)
+bw$rbp <- rbp
+bw$score <- NULL
+return(bw)
+}
+
+bw.EGF0.HNRNPC <- egf_granges("HNRNPC", "EGF0")
+bw.EGF15.HNRNPC <- egf_granges("HNRNPC", "EGF15")
+bw.EGF30.HNRNPC <- egf_granges("HNRNPC", "EGF30")
+bw.EGF60.HNRNPC <- egf_granges("HNRNPC", "EGF60")
+
+bw.EGF0.UPF1 <- egf_granges("UPF1", "EGF0_HMW")
+bw.EGF15.UPF1 <- egf_granges("UPF1", "EGF15_HMW")
+bw.EGF30.UPF1 <- egf_granges("UPF1", "EGF30_HMW")
+bw.EGF60.UPF1 <- egf_granges("UPF1", "EGF60_HMW")
+
+#Get normalized bigwigfiles from reclip
+egf_granges <- function(rbp, tp) {
+setwd("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/6_reclip-EGF_tcupf1/3_Bigwig_sum")
+bw.p <- rtracklayer::import.bw(paste(rbp, "A431_hnC", tp, "merged.p.scaleddewseq.bw", sep = "_"))
+bw.m <- rtracklayer::import.bw(paste(rbp, "A431_hnC", tp, "merged.m.scaleddewseq.bw", sep = "_"))
+
+strand(bw.p) <- "+"
+strand(bw.m) <- "-"
+
+bw <- bind_ranges(bw.p, bw.m)
+bw$timepoint <- gsub("_HMW", "", tp)
+bw$rbp <- paste("re", rbp, sep = "_")
+bw$score <- NULL
+return(bw)
+}
+
+bw.reEGF0.IgG <- egf_granges("IgG", "EGF0")
+bw.reEGF30.IgG <- egf_granges("IgG", "EGF30")
+bw.reEGF60.IgG <- egf_granges("IgG", "EGF60")
+
+bw.reEGF0.UPF1 <- egf_granges("UPF1", "EGF0_HMW")
+bw.reEGF30.UPF1 <- egf_granges("UPF1", "EGF30_HMW")
+bw.reEGF60.UPF1 <- egf_granges("UPF1", "EGF60_HMW")
+
+#Subset to AS transcripts
+gr.tx <- GRanges(AS_event_tx2[,grep("^TX_chr$", colnames(AS_event_tx2))],
+                  IRanges(start=AS_event_tx2[,grep("^TX_start$", colnames(AS_event_tx2))],
+                          end=AS_event_tx2[,grep("^TX_end$", colnames(AS_event_tx2))]),
+                  tx_name = AS_event_tx2[,grep("^TX_id$", colnames(AS_event_tx2))],
+                  strand = AS_event_tx2[,grep("^TX_strand$", colnames(AS_event_tx2))],
+                  gene_name = AS_event_tx2[,grep("^TX_geneID$", colnames(AS_event_tx2))],
+                width_region = AS_event_tx2[,grep("^TX_end$", colnames(AS_event_tx2))]-AS_event_tx2[,grep("^TX_start$", colnames(AS_event_tx2))],
+                AS = AS_event_tx2[,grep("^AS_event$", colnames(AS_event_tx2))])
+gr.tx <- unique_granges(gr.tx)
+
+get_density <- function(gr.tx, event) {
+  gr.tx <- subset(gr.tx, AS == event)
+  
+  bw.EGF0.HNRNPC <- find_overlaps(bw.EGF0.HNRNPC, gr.tx)
+  mcols(bw.EGF0.HNRNPC) <- mcols(bw.EGF0.HNRNPC)[c(1,2,6)]
+  bw.EGF0.HNRNPC <- unique_granges(bw.EGF0.HNRNPC)
+  
+  bw.EGF15.HNRNPC <- find_overlaps(bw.EGF15.HNRNPC, gr.tx)
+  mcols(bw.EGF15.HNRNPC) <- mcols(bw.EGF15.HNRNPC)[c(1,2,6)]
+  bw.EGF15.HNRNPC <- unique_granges(bw.EGF15.HNRNPC)
+  
+  bw.EGF30.HNRNPC <- find_overlaps(bw.EGF30.HNRNPC, gr.tx)
+  mcols(bw.EGF30.HNRNPC) <- mcols(bw.EGF30.HNRNPC)[c(1,2,6)]
+  bw.EGF30.HNRNPC <- unique_granges(bw.EGF30.HNRNPC)
+  
+  bw.EGF60.HNRNPC <- find_overlaps(bw.EGF60.HNRNPC, gr.tx)
+  mcols(bw.EGF60.HNRNPC) <- mcols(bw.EGF60.HNRNPC)[c(1,2,6)]
+  bw.EGF60.HNRNPC <- unique_granges(bw.EGF60.HNRNPC)
+  
+  bw.EGF0.UPF1 <- find_overlaps(bw.EGF0.UPF1, gr.tx)
+  mcols(bw.EGF0.UPF1) <- mcols(bw.EGF0.UPF1)[c(1,2,6)]
+  bw.EGF0.UPF1 <- unique_granges(bw.EGF0.UPF1)
+  
+  bw.EGF15.UPF1 <- find_overlaps(bw.EGF15.UPF1, gr.tx)
+  mcols(bw.EGF15.UPF1) <- mcols(bw.EGF15.UPF1)[c(1,2,6)]
+  bw.EGF15.UPF1 <- unique_granges(bw.EGF15.UPF1)
+  
+  bw.EGF30.UPF1 <- find_overlaps(bw.EGF30.UPF1, gr.tx)
+  mcols(bw.EGF30.UPF1) <- mcols(bw.EGF30.UPF1)[c(1,2,6)]
+  bw.EGF30.UPF1 <- unique_granges(bw.EGF30.UPF1)
+  
+  bw.EGF60.UPF1 <- find_overlaps(bw.EGF60.UPF1, gr.tx)
+  mcols(bw.EGF60.UPF1) <- mcols(bw.EGF60.UPF1)[c(1,2,6)]
+  bw.EGF60.UPF1 <- unique_granges(bw.EGF60.UPF1)
+  
+  bw.reEGF0.IgG <- find_overlaps(bw.reEGF0.IgG, gr.tx)
+  mcols(bw.reEGF0.IgG) <- mcols(bw.reEGF0.IgG)[c(1,2,6)]
+  bw.reEGF0.IgG <- unique_granges(bw.reEGF0.IgG)
+  
+  bw.reEGF30.IgG <- find_overlaps(bw.reEGF30.IgG, gr.tx)
+  mcols(bw.reEGF30.IgG) <- mcols(bw.reEGF30.IgG)[c(1,2,6)]
+  bw.reEGF30.IgG <- unique_granges(bw.reEGF30.IgG)
+  
+  bw.reEGF60.IgG <- find_overlaps(bw.reEGF60.IgG, gr.tx)
+  mcols(bw.reEGF60.IgG) <- mcols(bw.reEGF60.IgG)[c(1,2,6)]
+  bw.reEGF60.IgG <- unique_granges(bw.reEGF60.IgG)
+  
+  bw.reEGF0.UPF1 <- find_overlaps(bw.reEGF0.UPF1, gr.tx)
+  mcols(bw.reEGF0.UPF1) <- mcols(bw.reEGF0.UPF1)[c(1,2,6)]
+  bw.reEGF0.UPF1 <- unique_granges(bw.reEGF0.UPF1)
+  
+  bw.reEGF30.UPF1 <- find_overlaps(bw.reEGF30.UPF1, gr.tx)
+  mcols(bw.reEGF30.UPF1) <- mcols(bw.reEGF30.UPF1)[c(1,2,6)]
+  bw.reEGF30.UPF1 <- unique_granges(bw.reEGF30.UPF1)
+  
+  bw.reEGF60.UPF1 <- find_overlaps(bw.reEGF60.UPF1, gr.tx)
+  mcols(bw.reEGF60.UPF1) <- mcols(bw.reEGF60.UPF1)[c(1,2,6)]
+  bw.reEGF60.UPF1 <- unique_granges(bw.reEGF60.UPF1)
+  
+  bw.EGF <- bind_ranges(bw.EGF0.HNRNPC, bw.EGF15.HNRNPC, bw.EGF30.HNRNPC, bw.EGF60.HNRNPC,
+                        bw.EGF0.UPF1,bw.EGF15.UPF1,bw.EGF30.UPF1,bw.EGF60.UPF1, 
+                        bw.reEGF0.IgG, bw.reEGF30.IgG, bw.reEGF60.IgG, bw.reEGF0.UPF1, bw.reEGF30.UPF1, bw.reEGF60.UPF1)
+  
+  #UTR5
+  UTR5 <- gff_anno[gff_anno$type == "five_prime_UTR"]
+  UTR5_profile <- windowProfile(bw.EGF, UTR5)
+  UTR5_profile$Peaks$type <- "UTR5"
+  UTR5_profile$Peaks <- subset(UTR5_profile$Peaks, window_map != 3)
+  
+  #Exon
+  exon <- gff_anno[gff_anno$type == "CDS"]
+  exon_profile <- windowProfile(bw.EGF, exon)
+  exon_profile$Peaks$type <- "exon"
+  exon_profile$Peaks <- subset(exon_profile$Peaks, window_map != 3)
+  
+  #Intron
+  intron_profile <-  intronProfile(bw.EGF, annotation = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/0_Annotation/gencode.v39.annotation_protcoding.gff3")
+  intron_profile$Peaks$type <- "intron"
+  intron_profile$Peaks <- subset(intron_profile$Peaks, Intron_map != 3)
+  
+  #UTR3
+  UTR3 <- gff_anno[gff_anno$type == "three_prime_UTR"]
+  UTR3_profile <- windowProfile(bw.EGF, UTR3)
+  UTR3_profile$Peaks$type <- "UTR3"
+  UTR3_profile$Peaks <- subset(UTR3_profile$Peaks, window_map != 3)
+  
+  df <- data.frame("Position" = c(UTR5_profile$Peaks$window_map, exon_profile$Peaks$window_map, intron_profile$Peaks$Intron_map, UTR3_profile$Peaks$window_map), "location" = c(UTR5_profile$Peaks$type, exon_profile$Peaks$type, intron_profile$Peaks$type, UTR3_profile$Peaks$type), "group" = c(UTR5_profile$Peaks$timepoint, exon_profile$Peaks$timepoint, intron_profile$Peaks$timepoint, UTR3_profile$Peaks$timepoint), "rbp" = c(UTR5_profile$Peaks$rbp, exon_profile$Peaks$rbp, intron_profile$Peaks$rbp, UTR3_profile$Peaks$rbp))
+  df$AS <- event
+  return(df)
+}
+
+A5SS_pfl <- get_density(gr.tx, "A5SS")
+A3SS_pfl <- get_density(gr.tx, "A3SS")
+SE_pfl <- get_density(gr.tx, "SE")
+MXE_pfl <- get_density(gr.tx, "MXE")
+RI_pfl <- get_density(gr.tx, "RI")
+
+saveRDS(RI_pfl, "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/4_EGF_tc/4_Visualization/1_Distribution/RI_profile.rds")
+
+result <- rbind(A5SS_pfl, A3SS_pfl, SE_pfl, MXE_pfl, RI_pfl)
+
+#Calculate the percentage for each genomic feature
+percentage_rt <- function(as_df, event) {
+  df2 <- as_df %>%
+    group_by(location, group, rbp) %>%
+    summarise_at(vars(Position), funs(sum(., na.rm=TRUE)))
+  
+  df3 <- as_df %>%
+    group_by(group, rbp) %>%
+    summarise_at(vars(Position), funs(sum(., na.rm=TRUE)))
+  
+  result <- df2 %>%
+    left_join(df3, by = c("group", "rbp")) %>%
+    mutate(relative_position = Position.x / Position.y) %>%
+    select(location, group, rbp, relative_position)
+  result$type <- paste(result$group, result$rbp, sep = "_")
+  result$location <- factor(result$location, levels = c("UTR5", "exon", "intron", "UTR3"))
+  result$type <- factor(result$type, levels = c( "EGF0_HNRNPC", "EGF15_HNRNPC", "EGF30_HNRNPC", "EGF60_HNRNPC", "EGF0_UPF1",
+                                                "EGF15_UPF1", "EGF30_UPF1", "EGF60_UPF1", "EGF0_re_IgG", "EGF30_re_IgG",  "EGF60_re_IgG", 
+                                                "EGF0_re_UPF1", "EGF30_re_UPF1","EGF60_re_UPF1"))
+   result$AS <- event
+  return(result)
+}
+
+A5SS_res <- percentage_rt(A5SS_pfl, "A5SS")
+A3SS_res <- percentage_rt(A3SS_pfl, "A3SS")
+SE_res <- percentage_rt(SE_pfl, "SE")
+MXE_res <- percentage_rt(MXE_pfl, "MXE")
+RI_res <- percentage_rt(RI_pfl, "RI")
+
+all_res <- rbind(A5SS_res, A3SS_res, SE_res, MXE_res, RI_res)
+
+result2 <- all_res %>%
+    group_by(type, location) %>%
+    summarise_at(vars(relative_position), funs(mean(., na.rm=TRUE)))
+
+result2 <- dcast(result2 %>% dplyr::select(type, location, relative_position), type ~ location)
+rownames(result2) <- result2$type
+result2 <- result2[,-1]
+
+my.breaks <- c(seq(0, 50, by=0.01))
+my.colors <- rev(c(paletteer_c("grDevices::Spectral", length(my.breaks))))
+
+#Heatmap of percentages of RT stops
+ph <- pheatmap(round(100*result2,1), scale = "none", show_rownames = T, cluster_rows = FALSE, cluster_cols = FALSE,
+         color = my.colors, breaks = my.breaks, display_numbers = TRUE)#, cutree_rows = 4)
+ph
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+# Save the plot as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/4_EGF_tc/4_Visualization/1_Distribution/Percentage_RTstops_HNRNPC_UPF1_allregions.pdf", height = 3, width = 3.5)
+ph
+dev.off()
+```
+
+# 3. Changes in HNRNPC or UPF1 co-binding in 3'UTR of AS events after UPF1 and HNRNPC knockdowns
+Here, we analyze how the knockdown of the other partner is affecting the binding of the other protein at reclipped regions.
+
+```{r message=FALSE, warning=FALSE,}
+#Load annotation
+txdb <- loadDb("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/8_DTE_analysis/0_UPF1_HNRNPC/1_DTE/Genome/gencode.v39.annotation.sqlite")
+k <- keys(txdb, keytype = "TXNAME")
+tx2gene <- AnnotationDbi::select(txdb, k, "GENEID", "TXNAME")
+k <- keys(txdb, keytype = "EXONNAME")
+ex2gene <- AnnotationDbi::select(txdb, k, "GENEID", "EXONNAME")
+
+utr3 <- unlist(threeUTRsByTranscript(txdb, use.names=TRUE))
+utr3$TXNAME <- names(utr3)
+names(utr3) <- NULL
+u3 <- annoGR2DF(utr3)
+u3 <- merge(u3, tx2gene, by = "TXNAME")
+u3 <- u3 %>% dplyr::rename(TX_id = TXNAME)
+
+# #Granges for 3'UTR - Do only once!
+# u3.gr <- makeGRangesFromDataFrame(u3, keep.extra.columns = TRUE)
+# mcols(u3.gr) <- mcols(u3.gr)[c(3,5)]
+# 
+# u3.gr <- split(u3.gr, u3.gr$GENEID)
+# 
+# for (i in 1:length(names(u3.gr))) {
+#   u3.gr[[i]] <- reduceWithMcols(u3.gr[[i]])
+# }
+# 
+# u3.gr <- unlist(u3.gr)
+# u3.gr2 <- u3.gr
+# 
+# u3.gr2$exon_name <- sapply(u3.gr2$exon_name, function(x) {paste(unique(unlist(strsplit(x, split = "|", fixed = TRUE))), collapse = "|")})
+# u3.gr2$GENEID <- sapply(u3.gr2$GENEID, function(x) {paste(unique(unlist(strsplit(x, split = "|", fixed = TRUE))), collapse = "|")})
+# names(u3.gr2) <- NULL
+# u3.gr2$ID <- paste(u3.gr2$GENEID,"UTR",1:length(u3.gr2$GENEID), sep = "_")
+# names(u3.gr2) <-   u3.gr2$ID
+# saveRDS(u3.gr2, "/Users/lducoli/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/4_EGF_tc/4_Visualization/3UTR_granges.rds")
+
+u3.gr <- readRDS("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/4_EGF_tc/4_Visualization/3UTR_granges.rds")
+
+#Granges for AS events
+AS_event <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/4_EGF_tc/4_Visualization/1_Distribution/PC_AS_events.txt", header = TRUE)
+AS_event <- AS_event %>% mutate("gene_id" = sapply(strsplit(AS_event$region, "_"), function(x) x[1]),
+                                "gene_name"= sapply(strsplit(AS_event$region, "_"), function(x) x[2]), 
+                                "chr"= sapply(strsplit(AS_event$region, "_"), function(x) x[3]),
+                                "strand"= sapply(strsplit(AS_event$region, "_"), function(x) x[4]), 
+                                "start" = sapply(strsplit(AS_event$region, "_"), function(x) x[5]),
+                                "end"= sapply(strsplit(AS_event$region, "_"), function(x) x[6])) %>% dplyr::select(c(region,chr,start,end, strand, gene_id, gene_name, AS))
+
+AS_event_tx <- merge(AS_event %>% dplyr::select(region,gene_id,AS), gtf_df[gtf_df$type == "transcript",], by = "gene_id") %>% dplyr::select(c(seqnames,start,end,transcript_id, strand, gene_id, gene_name, AS))
+
+AS_event_bed <- AS_event %>% dplyr::select(chr, start, end, strand, region, gene_id, AS)
+AS_event_tx_bed <- AS_event_tx %>% dplyr::select(seqnames, start, end, strand, transcript_id, gene_id)
+
+AS_event_tx2 <- bedtoolsr::bt.intersect(AS_event_bed, AS_event_tx_bed, loj = TRUE)
+AS_event_tx2 <- unique(AS_event_tx2)
+
+colnames(AS_event_tx2) <- c("AS_chr", "AS_start", "AS_end", "AS_strand", "AS_region", "AS_geneID", "AS_event", "TX_chr", "TX_start", "TX_end", "TX_strand", "TX_id", "TX_geneID")
+AS_event_tx2 <- AS_event_tx2 %>% mutate(geneIDmatch = case_when(AS_geneID != TX_geneID  ~ "0",AS_geneID == TX_geneID ~ "1"))
+AS_event_tx2 <- subset(AS_event_tx2, geneIDmatch > 0)
+
+u3_AS_event <- merge(AS_event_tx2, u3, by = "TX_id")
+AS <- AS_event
+AS <- data.frame("region" = AS$region,
+                 "gene_id" = sapply(strsplit(AS$region, "_"), function(x) x[1]),
+                 "gene_name"= sapply(strsplit(AS$region, "_"), function(x) x[2]),
+                 "chr"= sapply(strsplit(AS$region, "_"), function(x) x[3]),
+                 "start" = sapply(strsplit(AS$region, "_"), function(x) x[7]),
+                 "end"= sapply(strsplit(AS$region, "_"), function(x) x[10]),
+                 "strand" = sapply(strsplit(AS$region, "_"), function(x) x[4]),
+                 "AS" = AS$AS )
+
+#It takes some time
+# AS_u3.gr <- makeGRangesFromDataFrame(u3_AS_event, keep.extra.columns = TRUE)
+# mcols(AS_u3.gr) <- mcols(AS_u3.gr)[6]
+# AS_u3.gr <- unique_granges(AS_u3.gr)
+# colnames(mcols(AS_u3.gr))[colnames(mcols(AS_u3.gr)) == "AS_region"] <- "region"
+# AS_u3.gr$AS_event <- "all"
+# AS_u3.gr$AS_region <- AS_u3.gr$region
+# AS_u3.gr$region <- sapply(strsplit(AS_u3.gr$region, "_"), function(x) x[2])
+# AS_u3.gr <- split(AS_u3.gr, AS_u3.gr$region)
+# 
+# for (i in 1:length(names(AS_u3.gr))) {
+#   AS_u3.gr[[i]] <- reduceWithMcols(AS_u3.gr[[i]])
+# }
+# 
+# AS_u3.gr <- unlist(AS_u3.gr)
+# AS_u3.gr$region <- sapply(AS_u3.gr$region, function(x) {paste(unique(unlist(strsplit(x, split = "|", fixed = TRUE))), collapse = "|")})
+# AS_u3.gr$AS_event <- sapply(AS_u3.gr$AS_event, function(x) {paste(unique(unlist(strsplit(x, split = "|", fixed = TRUE))), collapse = "|")})
+# AS_u3.gr$AS_region <- sapply(AS_u3.gr$AS_region, function(x) {paste(unique(unlist(strsplit(x, split = "|", fixed = TRUE))), collapse = "|")})
+# names(AS_u3.gr) <- NULL
+# saveRDS(AS_u3.gr, "/Users/lducoli/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/4_EGF_tc/4_Visualization/3UTR_AS_granges.rds")
+AS_u3.gr <- readRDS("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/4_EGF_tc/4_Visualization/3UTR_AS_granges.rds")
+
+#Find overlap between AS events and u3
+overlaps <- findOverlaps(u3.gr, AS_u3.gr)
+overlapping_names <- names(u3.gr)[queryHits(overlaps)]
+```
+
+```{r message=FALSE, warning=FALSE, fig.height=5, fig.width=5}
+#Get for the Re-CLIP
+gr <- u3.gr
+gr.p <- subset(gr, strand == "+")
+gr.p$width_region <- end(gr.p) - start(gr.p)
+gr.m <- subset(gr, strand == "-")
+gr.m$width_region <- end(gr.m) - start(gr.m)
+
+#Load bigwigfile of Re-CLIP data
+dir <- "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/6_reclip-EGF_tcupf1/2_Bigwig/"
+bw.IgG.EGF0.r1.p <- import.bw(paste(dir, "IgG_A431_hnC_EGF0_R1.p.bw", sep = ""))
+bw.IgG.EGF0.r1.m <- import.bw(paste(dir, "IgG_A431_hnC_EGF0_R1.m.bw", sep = ""))
+bw.IgG.EGF0.r2.p <- import.bw(paste(dir, "IgG_A431_hnC_EGF0_R2.p.bw", sep = ""))
+bw.IgG.EGF0.r2.m <- import.bw(paste(dir, "IgG_A431_hnC_EGF0_R2.m.bw", sep = ""))
+
+bw.IgG.EGF30.r1.p <- import.bw(paste(dir, "IgG_A431_hnC_EGF30_R1.p.bw", sep = ""))
+bw.IgG.EGF30.r1.m <- import.bw(paste(dir, "IgG_A431_hnC_EGF30_R1.m.bw", sep = ""))
+bw.IgG.EGF30.r2.p <- import.bw(paste(dir, "IgG_A431_hnC_EGF30_R2.p.bw", sep = ""))
+bw.IgG.EGF30.r2.m <- import.bw(paste(dir, "IgG_A431_hnC_EGF30_R2.m.bw", sep = ""))
+
+bw.IgG.EGF60.r1.p <- import.bw(paste(dir, "IgG_A431_hnC_EGF60_R1.p.bw", sep = ""))
+bw.IgG.EGF60.r1.m <- import.bw(paste(dir, "IgG_A431_hnC_EGF60_R1.m.bw", sep = ""))
+bw.IgG.EGF60.r2.p <- import.bw(paste(dir, "IgG_A431_hnC_EGF60_R2.p.bw", sep = ""))
+bw.IgG.EGF60.r2.m <- import.bw(paste(dir, "IgG_A431_hnC_EGF60_R2.m.bw", sep = ""))
+
+bw.UPF1.EGF0.r1.p <- import.bw(paste(dir, "UPF1_A431_hnC_EGF0_HMW_R1.p.bw", sep = ""))
+bw.UPF1.EGF0.r1.m <- import.bw(paste(dir, "UPF1_A431_hnC_EGF0_HMW_R1.m.bw", sep = ""))
+bw.UPF1.EGF0.r2.p <- import.bw(paste(dir, "UPF1_A431_hnC_EGF0_HMW_R2.p.bw", sep = ""))
+bw.UPF1.EGF0.r2.m <- import.bw(paste(dir, "UPF1_A431_hnC_EGF0_HMW_R2.m.bw", sep = ""))
+
+bw.UPF1.EGF30.r1.p <- import.bw(paste(dir, "UPF1_A431_hnC_EGF30_HMW_R1.p.bw", sep = ""))
+bw.UPF1.EGF30.r1.m <- import.bw(paste(dir, "UPF1_A431_hnC_EGF30_HMW_R1.m.bw", sep = ""))
+bw.UPF1.EGF30.r2.p <- import.bw(paste(dir, "UPF1_A431_hnC_EGF30_HMW_R2.p.bw", sep = ""))
+bw.UPF1.EGF30.r2.m <- import.bw(paste(dir, "UPF1_A431_hnC_EGF30_HMW_R2.m.bw", sep = ""))
+
+bw.UPF1.EGF60.r1.p <- import.bw(paste(dir, "UPF1_A431_hnC_EGF60_HMW_R1.p.bw", sep = ""))
+bw.UPF1.EGF60.r1.m <- import.bw(paste(dir, "UPF1_A431_hnC_EGF60_HMW_R1.m.bw", sep = ""))
+bw.UPF1.EGF60.r2.p <- import.bw(paste(dir, "UPF1_A431_hnC_EGF60_HMW_R2.p.bw", sep = ""))
+bw.UPF1.EGF60.r2.m <- import.bw(paste(dir, "UPF1_A431_hnC_EGF60_HMW_R2.m.bw", sep = ""))
+
+#Create profile matrices
+gr.p$EGF0IgG_1 <- getCountsByRegions(bw.IgG.EGF0.r1.p, gr.p)
+gr.p$EGF0IgG_2 <- getCountsByRegions(bw.IgG.EGF0.r2.p, gr.p)
+gr.p$EGF30IgG_1 <- getCountsByRegions(bw.IgG.EGF30.r1.p, gr.p)
+gr.p$EGF30IgG_2 <- getCountsByRegions(bw.IgG.EGF30.r2.p, gr.p)
+gr.p$EGF60IgG_1 <- getCountsByRegions(bw.IgG.EGF60.r1.p, gr.p)
+gr.p$EGF60IgG_2 <- getCountsByRegions(bw.IgG.EGF60.r2.p, gr.p)
+gr.p$EGF0UPF1_1 <- getCountsByRegions(bw.UPF1.EGF0.r1.p, gr.p)
+gr.p$EGF0UPF1_2 <- getCountsByRegions(bw.UPF1.EGF0.r2.p, gr.p)
+gr.p$EGF30UPF1_1 <- getCountsByRegions(bw.UPF1.EGF30.r1.p, gr.p)
+gr.p$EGF30UPF1_2 <- getCountsByRegions(bw.UPF1.EGF30.r2.p, gr.p)
+gr.p$EGF60UPF1_1 <- getCountsByRegions(bw.UPF1.EGF60.r1.p, gr.p)
+gr.p$EGF60UPF1_2 <- getCountsByRegions(bw.UPF1.EGF60.r2.p, gr.p)
+
+gr.m$EGF0IgG_1 <- getCountsByRegions(bw.IgG.EGF0.r1.m, gr.m)
+gr.m$EGF0IgG_2 <- getCountsByRegions(bw.IgG.EGF0.r2.m, gr.m)
+gr.m$EGF30IgG_1 <- getCountsByRegions(bw.IgG.EGF30.r1.m, gr.m)
+gr.m$EGF30IgG_2 <- getCountsByRegions(bw.IgG.EGF30.r2.m, gr.m)
+gr.m$EGF60IgG_1 <- getCountsByRegions(bw.IgG.EGF60.r1.m, gr.m)
+gr.m$EGF60IgG_2 <- getCountsByRegions(bw.IgG.EGF60.r2.m, gr.m)
+gr.m$EGF0UPF1_1 <- getCountsByRegions(bw.UPF1.EGF0.r1.m, gr.m)
+gr.m$EGF0UPF1_2 <- getCountsByRegions(bw.UPF1.EGF0.r2.m, gr.m)
+gr.m$EGF30UPF1_1 <- getCountsByRegions(bw.UPF1.EGF30.r1.m, gr.m)
+gr.m$EGF30UPF1_2 <- getCountsByRegions(bw.UPF1.EGF30.r2.m, gr.m)
+gr.m$EGF60UPF1_1 <- getCountsByRegions(bw.UPF1.EGF60.r1.m, gr.m)
+gr.m$EGF60UPF1_2 <- getCountsByRegions(bw.UPF1.EGF60.r2.m, gr.m)
+
+#Merge replicates
+gr <- bind_ranges(gr.p, gr.m)
+
+reclip_reg <- as.data.frame(mcols(gr))
+reclip_design <- data.frame(label = colnames(reclip_reg)[grep("EGF", colnames(reclip_reg))], time = rep(rep(c("T0", "T30", "T60"), each = 2), 2), replicate = rep(c("1", "2"), 6),
+                            condition = rep(c("IgG", "UPF1"), each = 6))
+
+reclip_reg_mat <- reclip_reg[,grep("EGF", colnames(reclip_reg))]
+reclip_design$condition2 <- paste(reclip_design$time, reclip_design$condition, sep = "_")
+
+deseq_total_rt_reclip <- function(data, design, TP){
+  dds <- DESeqDataSetFromMatrix(reclip_reg_mat, reclip_design, ~ condition)
+  keep <- rowSums(counts(dds)) >= 3
+  dds <- dds[keep,]
+  dds <- estimateSizeFactors(dds)
+  dds <- dds[,dds$condition2 %in% TP]
+  normalized_counts <- counts(dds, normalized=TRUE)
+  dds <- DESeq(dds)
+  dds_logFC <- coef(dds, SE = F)
+  dds_SE <- coef(dds, SE = T)
+  dds_cent <- coef(dds, SE = F)/coef(dds, SE = T)
+  colnames(dds_cent)[2] <- paste(TP[1], "UVCvsIgG", sep = "_")
+  res <- as.data.frame(results(dds))
+  return(list(table = dds_cent, res = res, norm_counts = normalized_counts, dds = dds, dds_SE = dds_SE))
+}
+
+tp0_reclip <- deseq_total_rt_reclip(reclip_reg_mat, reclip_design, TP = c("T0_IgG", "T60_UPF1"))
+tp30_reclip <- deseq_total_rt_reclip(reclip_reg_mat, reclip_design, TP = c("T30_IgG", "T60_UPF1"))
+tp60_reclip <- deseq_total_rt_reclip(reclip_reg_mat, reclip_design, TP = c("T60_IgG", "T60_UPF1"))
+
+tp0_reclip_res <-  as.data.frame(tp0_reclip$res)
+tp0_reclip_res <- cbind(tp0_reclip_res, tp0_reclip$table)
+
+tp30_reclip_res <-  as.data.frame(tp30_reclip$res)
+tp30_reclip_res <- cbind(tp30_reclip_res, tp30_reclip$table)
+
+tp60_reclip_res <-  as.data.frame(tp60_reclip$res)
+tp60_reclip_res <- cbind(tp60_reclip_res, tp60_reclip$table)
+
+coverage_matrix_KD <- function(gr, rbp, cond){
+  gr.p <- subset(gr, strand == "+")
+  gr.p$width_region <- end(gr.p) - start(gr.p)
+  gr.m <- subset(gr, strand == "-")
+  gr.m$width_region <- end(gr.m) - start(gr.m)
+  
+  #Load bigwigfile
+  dir <- "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/5_Knockdown/2_Bigwig/"
+  bw.EGF0Ctrl.r1.p <- import.bw(paste(dir, rbp, "_CTRi_EGF0_R1.p.bw", sep = ""))
+  bw.EGF0Ctrl.r1.m <- import.bw(paste(dir, rbp, "_CTRi_EGF0_R1.m.bw", sep = ""))
+  bw.EGF0Ctrl.r2.p <- import.bw(paste(dir, rbp, "_CTRi_EGF0_R2.p.bw", sep = ""))
+  bw.EGF0Ctrl.r2.m <- import.bw(paste(dir, rbp, "_CTRi_EGF0_R2.m.bw", sep = ""))
+  
+  bw.EGF0KD.r1.p <- import.bw(paste(dir, rbp, cond, "EGF0_R1.p.bw", sep = ""))
+  bw.EGF0KD.r1.m <- import.bw(paste(dir, rbp, cond, "EGF0_R1.m.bw", sep = ""))
+  bw.EGF0KD.r2.p <- import.bw(paste(dir, rbp, cond, "EGF0_R2.p.bw", sep = ""))
+  bw.EGF0KD.r2.m <- import.bw(paste(dir, rbp, cond, "EGF0_R2.m.bw", sep = ""))
+  
+  bw.EGF60Ctrl.r1.p <- import.bw(paste(dir, rbp, "_CTRi_EGF60_R1.p.bw", sep = ""))
+  bw.EGF60Ctrl.r1.m <- import.bw(paste(dir, rbp, "_CTRi_EGF60_R1.m.bw", sep = ""))
+  bw.EGF60Ctrl.r2.p <- import.bw(paste(dir, rbp, "_CTRi_EGF60_R2.p.bw", sep = ""))
+  bw.EGF60Ctrl.r2.m <- import.bw(paste(dir, rbp, "_CTRi_EGF60_R2.m.bw", sep = ""))
+  
+  bw.EGF60KD.r1.p <- import.bw(paste(dir, rbp, cond, "EGF60_R1.p.bw", sep = ""))
+  bw.EGF60KD.r1.m <- import.bw(paste(dir, rbp, cond, "EGF60_R1.m.bw", sep = ""))
+  bw.EGF60KD.r2.p <- import.bw(paste(dir, rbp, cond, "EGF60_R2.p.bw", sep = ""))
+  bw.EGF60KD.r2.m <- import.bw(paste(dir, rbp, cond, "EGF60_R2.m.bw", sep = ""))
+  
+  #Create profile matrices
+  gr.p$EGF0Ctrl_1 <- getCountsByRegions(bw.EGF0Ctrl.r1.p, gr.p)
+  gr.p$EGF0Ctrl_2 <- getCountsByRegions(bw.EGF0Ctrl.r2.p, gr.p)
+  gr.p$EGF0KD_1 <- getCountsByRegions(bw.EGF0KD.r1.p, gr.p)
+  gr.p$EGF0KD_2 <- getCountsByRegions(bw.EGF0KD.r2.p, gr.p)
+  gr.p$EGF60Ctrl_1 <- getCountsByRegions(bw.EGF60Ctrl.r1.p, gr.p)
+  gr.p$EGF60Ctrl_2 <- getCountsByRegions(bw.EGF60Ctrl.r2.p, gr.p)
+  gr.p$EGF60KD_1 <- getCountsByRegions(bw.EGF60KD.r1.p, gr.p)
+  gr.p$EGF60KD_2 <- getCountsByRegions(bw.EGF60KD.r2.p, gr.p)
+  
+  gr.m$EGF0Ctrl_1 <- getCountsByRegions(bw.EGF0Ctrl.r1.m, gr.m)
+  gr.m$EGF0Ctrl_2 <- getCountsByRegions(bw.EGF0Ctrl.r2.m, gr.m)
+  gr.m$EGF0KD_1 <- getCountsByRegions(bw.EGF0KD.r1.m, gr.m)
+  gr.m$EGF0KD_2 <- getCountsByRegions(bw.EGF0KD.r2.m, gr.m)
+  gr.m$EGF60Ctrl_1 <- getCountsByRegions(bw.EGF60Ctrl.r1.m, gr.m)
+  gr.m$EGF60Ctrl_2 <- getCountsByRegions(bw.EGF60Ctrl.r2.m, gr.m)
+  gr.m$EGF60KD_1 <- getCountsByRegions(bw.EGF60KD.r1.m, gr.m)
+  gr.m$EGF60KD_2 <- getCountsByRegions(bw.EGF60KD.r2.m, gr.m)
+  
+  #Merge replicates
+  gr <- bind_ranges(gr.p, gr.m)
+  
+  all <- as.data.frame(mcols(gr))
+  colnames(all)[grep("EGF", colnames(all))] <- paste(rbp, colnames(all)[grep("EGF", colnames(all))], sep = "_")
+  
+  return(all)
+}
+
+#KD total signal
+kdHNRNPC_3utr <- coverage_matrix_KD(  u3.gr, "HNRNPC", "_UPF1i_")
+kdUPF1_3utr <- coverage_matrix_KD(u3.gr, "UPF1", "_hnCi_")
+
+#KD
+kdHNRNPC_reg <- kdHNRNPC_3utr
+kdUPF1_reg <- kdUPF1_3utr
+
+kdHNRNPC_design <- data.frame(label = colnames(kdHNRNPC_reg)[grep("EGF", colnames(kdHNRNPC_reg))], time = rep(c("T0", "T60"), each = 4), replicate = rep(c("1", "2"), 4),
+                              condition = rep(c("Ctrl", "KD", "Ctrl", "KD"), each = 2))
+kdHNRNPC_reg_mat <- kdHNRNPC_reg[,grep("EGF", colnames(kdHNRNPC_reg))]
+
+kdUPF1_design <- data.frame(label = colnames(kdUPF1_reg)[grep("EGF", colnames(kdUPF1_reg))], time = rep(c("T0", "T60"), each = 4), replicate = rep(c("1", "2"), 4),
+                            condition = rep(c("Ctrl", "KD", "Ctrl", "KD"), each = 2))
+kdUPF1_reg_mat <- kdUPF1_reg[,grep("EGF", colnames(kdUPF1_reg))]
+
+kdHNRNPC_design$condition2 <- paste(kdHNRNPC_design$time, kdHNRNPC_design$condition, sep = "_")
+kdUPF1_design$condition2 <- paste(kdUPF1_design$time, kdUPF1_design$condition, sep = "_")
+
+deseq_total_rt_kd <- function(data, design, rbp, TP){
+  dds <- DESeqDataSetFromMatrix(data, design, ~ condition)
+  keep <- rowSums(counts(dds)) >= 3
+  dds <- dds[keep,]
+  dds <- estimateSizeFactors(dds)
+  dds <- dds[,dds$time == TP]
+  normalized_counts <- counts(dds, normalized=TRUE)
+  dds <- DESeq(dds)
+  res <- results(dds)
+  dds_logFC <- coef(dds, SE = F)
+  dds_SE <- coef(dds, SE = T)
+  dds_cent <- coef(dds, SE = F)/coef(dds, SE = T)
+  colnames(dds_cent)[2] <- paste(rbp, TP, "CtrlvsKD", sep = "_")
+  return(list(table = dds_cent, res = res, norm_counts = normalized_counts, dds = dds, dds_SE = dds_SE))
+}
+
+kdHNRNPC_cent <- deseq_total_rt_kd(kdHNRNPC_reg_mat, kdHNRNPC_design, "HNRNPC", "T60")
+kdUPF1_cent <- deseq_total_rt_kd(kdUPF1_reg_mat, kdUPF1_design, "UPF1", "T60")
+
+#Get the reclip bound AS events
+UPF1_ASregions <-  overlapping_names
+UPF1_reclipregions <-  unique(c(unique(c(rownames(tp60_reclip_res)[(tp60_reclip_res$T60_IgG_UVCvsIgG > 1 & !(is.na(tp60_reclip_res$padj)))]))))
+UPF1_reclipregions <- UPF1_reclipregions[!is.na(UPF1_reclipregions)]
+UPF1_ASregions2 <- setdiff(UPF1_ASregions, UPF1_reclipregions)
+UPF1_reclipregions2 <- setdiff(UPF1_reclipregions, UPF1_ASregions)
+UPF1_reclipregions <- intersect(UPF1_ASregions, UPF1_reclipregions)
+
+#HNRNPC
+kdHNRNPC_cent_res <-  as.data.frame(kdHNRNPC_cent$res)
+kdHNRNPC_cent_res <-  cbind(kdHNRNPC_cent_res, kdHNRNPC_cent$table)
+kdHNRNPC_cent_res$reclip <- rownames(kdHNRNPC_cent_res) %in% UPF1_reclipregions
+kdHNRNPC_cent_res$AS <- rownames(kdHNRNPC_cent_res) %in% UPF1_ASregions2
+kdHNRNPC_cent_res$reclip_only <- rownames(kdHNRNPC_cent_res) %in% UPF1_reclipregions2
+kdHNRNPC_cent_res$type <- paste(kdHNRNPC_cent_res$reclip, kdHNRNPC_cent_res$AS, kdHNRNPC_cent_res$reclip_only, sep = "_")
+kdHNRNPC_cent_res2 <- subset(as.data.frame(kdHNRNPC_cent_res), !(is.na(padj)))
+kdHNRNPC_cent_res2$log2FoldChange <- as.numeric(kdHNRNPC_cent_res2$log2FoldChange)
+kdHNRNPC_cent_res2$HNRNPC_T60_CtrlvsKD <- as.numeric(kdHNRNPC_cent_res2$HNRNPC_T60_CtrlvsKD)
+kdHNRNPC_cent_res2$type <- revalue(kdHNRNPC_cent_res2$type, c("FALSE_FALSE_FALSE" = "none", "FALSE_TRUE_FALSE" = "AS_no_reclip",  "TRUE_FALSE_FALSE" = "AS_reclip", "FALSE_FALSE_TRUE" = "reclip_only" ))
+kdHNRNPC_cent_res2$type <- factor(kdHNRNPC_cent_res2$type, levels = c("none", "AS_reclip", "reclip_only", "AS_no_reclip"))
+
+#UPF1
+kdUPF1_cent_res <-  as.data.frame(kdUPF1_cent$res)
+kdUPF1_cent_res <-  cbind(kdUPF1_cent_res, kdUPF1_cent$table)
+kdUPF1_cent_res$reclip <- rownames(kdUPF1_cent_res) %in% UPF1_reclipregions
+kdUPF1_cent_res$AS <- rownames(kdUPF1_cent_res) %in% UPF1_ASregions2
+kdUPF1_cent_res$reclip_only <- rownames(kdUPF1_cent_res) %in% UPF1_reclipregions2
+kdUPF1_cent_res$type <- paste(kdUPF1_cent_res$reclip, kdUPF1_cent_res$AS, kdUPF1_cent_res$reclip_only, sep = "_")
+kdUPF1_cent_res2 <- subset(as.data.frame(kdUPF1_cent_res), !(is.na(padj)))
+kdUPF1_cent_res2$log2FoldChange <- as.numeric(kdUPF1_cent_res2$log2FoldChange)
+kdUPF1_cent_res2$UPF1_T60_CtrlvsKD <- as.numeric(kdUPF1_cent_res2$UPF1_T60_CtrlvsKD)
+kdUPF1_cent_res2$type <- revalue(kdUPF1_cent_res2$type, c("FALSE_FALSE_FALSE" = "none", "FALSE_TRUE_FALSE" = "AS_no_reclip",  "TRUE_FALSE_FALSE" = "AS_reclip", "FALSE_FALSE_TRUE" = "reclip_only" ))
+kdUPF1_cent_res2$type <- factor(kdUPF1_cent_res2$type, levels = c("none", "AS_reclip", "reclip_only", "AS_no_reclip"))
+
+cols2 <- c("none" = "grey", "AS_no_reclip" = "blue", "AS_reclip" = "red",  "reclip_only" = "orange")
+
+plot_HNRNPC <- ggplot(kdHNRNPC_cent_res2, aes(x=log2(baseMean), y=HNRNPC_T60_CtrlvsKD, color = type)) +
+  geom_point() +
+  scale_colour_manual(values = cols2) +
+  theme_bw()+
+  theme(panel.grid=element_blank(), legend.position="none")+  ylab("Z score (log2FC Ctrl vs Knockdown)") + xlab("log2(mean HNRNPC binding)") + ylim(-6,6) +
+  xlim(4.75,11.5) +
+  ggtitle("HNRNPC") + geom_hline(yintercept = 0, linetype="dashed")
+
+plot_upf1 <- ggplot(kdUPF1_cent_res2, aes(x=log2(baseMean), y=UPF1_T60_CtrlvsKD, color = type)) +
+  geom_point() +
+  scale_colour_manual(values = cols2) +
+  theme_bw()+
+  theme(panel.grid=element_blank(), legend.position="none")+  ylab("Z score (log2FC Ctrl vs Knockdown)") + xlab("log2(mean UPF1 binding)") + ylim(-6,6) +
+  xlim(4.75,11.5) +
+  ggtitle("UPF1") + geom_hline(yintercept = 0, linetype="dashed")
+
+density_HNRNPC_nopval <- ggplot(kdHNRNPC_cent_res2, aes(x=type, y=HNRNPC_T60_CtrlvsKD, fill=type)) +
+  geom_boxplot() +  
+  scale_colour_manual(values = cols2) +
+  scale_fill_manual(values = cols2) +
+  theme_bw()+
+  theme(panel.grid=element_blank())+
+  ylab("Z score (log2FC Ctrl vs Knockdown)") + xlab("")+ ylim(-6,6) +
+  ggtitle("HNRNPC") +
+  stat_summary(fun=mean, geom="point", shape=20, size=2, color="black", fill="black") +
+  geom_hline(aes(yintercept=0),color="black", linetype="dashed")
+
+density_UPF1_nopval <- ggplot(kdUPF1_cent_res2, aes(x=type, y=UPF1_T60_CtrlvsKD, fill=type)) +
+  geom_boxplot() +  
+  scale_colour_manual(values = cols2) +
+  scale_fill_manual(values = cols2) +
+  theme_bw()+
+  theme(panel.grid=element_blank())+
+  ylab("Z score (log2FC Ctrl vs Knockdown)") + xlab("")+ ylim(-6,6) +
+  ggtitle("UPF1") +
+  stat_summary(fun=mean, geom="point", shape=20, size=2, color="black", fill="black") +
+  geom_hline(aes(yintercept=0),color="black", linetype="dashed")
+
+plot_HNRNPC
+plot_upf1
+density_HNRNPC_nopval
+density_UPF1_nopval
+```
+```{r warning=FALSE, message=FALSE}
+library(multcomp)
+set.seed(123)
+kdHNRNPC_cent_res2$type <- relevel(kdHNRNPC_cent_res2$type, ref = "none")
+kdUPF1_cent_res2$type <- relevel(kdUPF1_cent_res2$type, ref = "none")
+
+HNRNPC.res_aov <- aov(HNRNPC_T60_CtrlvsKD ~ type, data = kdHNRNPC_cent_res2)
+post_test <- glht(HNRNPC.res_aov, linfct = mcp(type = "Dunnett"), alternative = "two.sided")
+summary(post_test)
+
+UPF1.res_aov <- aov(UPF1_T60_CtrlvsKD ~ type, data = kdUPF1_cent_res2)
+post_test2 <- glht(UPF1.res_aov, linfct = mcp(type = "Dunnett"), alternative = "two.sided")
+summary(post_test2)
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+# Save the plot as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/4_EGF_tc/4_Visualization/1_Distribution/scatter_HNRNPC_UPF1_AS_reclip.pdf",  height=5, width=5)
+plot_HNRNPC
+plot_upf1
+dev.off()
+
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/4_EGF_tc/4_Visualization/1_Distribution/Boxplot_HNRNPC_UPF1_AS_reclip.pdf",  height=5, width=3)
+density_HNRNPC_nopval
+density_UPF1_nopval
+dev.off()
+```
+All the visualizations were saved as pdf and modified in illustrator.
+
+```{r}
+sessionInfo()
+```
+
+
+
