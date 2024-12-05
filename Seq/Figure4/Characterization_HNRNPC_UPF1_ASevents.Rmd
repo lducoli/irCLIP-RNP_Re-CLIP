@@ -1,0 +1,424 @@
+---
+title: "Characterization of AS events regulated by both UPF1 and HNRNPC"
+author: "Luca Ducoli"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document: 
+    latex_engine: xelatex
+    pandoc_args: --listings
+    includes:
+      in_header: preamble.tex
+  html_document:
+    df_print: paged
+---
+
+This is the pipeline used to analyze the alternative splicing events which are regulated by HNRNPC and UPF1 during EGF stimulation.
+
+# 1. UPF1 and HNRNPC co-regulation of alternative splicing event
+Splicing was performed using rMATs.
+
+```{r warning=FALSE, message=FALSE}
+#Needed libraries
+library(ggplot2)
+library(viridis)
+library(hrbrthemes)
+library(tidyverse)
+library(tidyr)
+library(stringr)
+library(pheatmap)
+library(UpSetR)
+library(gridExtra)
+library(grid)
+library(RColorBrewer)
+library(reshape2)
+library(psych)
+library(factoextra)
+library(ggpubr)
+library(ggrepel)
+library(gprofiler2)
+library(dplyr)
+library(tximportData)
+library(GenomicFeatures)
+library(tximport)
+library(SummarizedExperiment)
+library(tximeta)
+library(fishpond)
+library(org.Hs.eg.db)
+library(rtracklayer)
+library(bedtoolsr)
+library(DESeq2)
+library(fishpond)
+library(org.Hs.eg.db)
+library(rstatix)
+library(broom)
+library(gap)
+library(ggExtra)
+library(ggpmisc)
+library(MASS)
+options(bedtools.path = "~/opt/miniconda3/bin/")
+```
+
+##Upset plot AS event between UPF1 and HNRNPC
+
+From here, we focused on UPF1 and HNRNPC.
+```{r warning=FALSE, message=FALSE, fig.width=4, fig.height=4}
+All_AS_overlap <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/1_RNA-Seq_splicing/2_Splicing_analysis/2_Correlation/Sign_AS_events_all.txt", header = TRUE)
+
+list_region <- list( HNRNPC_high = unique(c(unique(All_AS_overlap$region[All_AS_overlap$hnrnpc == 1 & All_AS_overlap$hnrnpc_dPSI > 0]))), 
+              UPF1_high = unique(c(unique(All_AS_overlap$region[All_AS_overlap$upf1 == 1 & All_AS_overlap$upf1_dPSI > 0]))), 
+              HNRNPC_low = unique(c(unique(All_AS_overlap$region[All_AS_overlap$hnrnpc == 1 & All_AS_overlap$hnrnpc_dPSI < 0]))), 
+              UPF1_low = unique(c(unique(All_AS_overlap$region[All_AS_overlap$upf1 == 1 & All_AS_overlap$upf1_dPSI < 0]))))
+
+upset <- upset(fromList(list_region),
+  sets = c(names(list_region)[1],names(list_region)[2], names(list_region)[3], names(list_region)[4]),
+  mb.ratio = c(0.8, 0.2),
+  number.angles = 0,
+  text.scale = 1,
+  point.size = 3, 
+  line.size = 1,
+  keep.order = TRUE
+)
+```
+
+```{r message=FALSE, warning=FALSE, fig.width = 5, fig.height = 4}
+upset
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+#Save the plot as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/8_DTE_analysis/0_UPF1_HNRNPC/0_Overlap/Upsetplot_UPF1_HNRNPC.pdf", height = 5, width = 4)
+upset
+dev.off()
+```
+
+```{r warning=FALSE, message=FALSE, fig.width=4, fig.height=4}
+overlap <- function (input) {
+  elements <- unique(unlist(input))
+  data <- unlist(lapply(input, function(x) {
+    x <- as.vector(match(elements, x))
+  }))
+  data[is.na(data)] <- as.integer(0)
+  data[data != 0] <- as.integer(1)
+  data <- data.frame(matrix(data, ncol = length(input), byrow = F))
+  data <- data[which(rowSums(data) != 0), ]
+  names(data) <- names(input)
+  row.names(data) <- elements
+  return(data)
+}
+
+#Binary table with colnames:
+sign.regions <- overlap(list_region)
+
+sign.regions$region <- rownames(sign.regions)
+rownames(sign.regions) <- NULL
+
+sign.regions <- merge(sign.regions, All_AS_overlap %>% dplyr::select(region, hnrnpc_dPSI, upf1_dPSI, AS), by = "region")
+sign.regions <- sign.regions[(sign.regions$HNRNPC_high == 1 & sign.regions$UPF1_high == 1) | (sign.regions$HNRNPC_low == 1 & sign.regions$UPF1_low == 1),]
+
+write.table(sign.regions, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/8_DTE_analysis/0_UPF1_HNRNPC/0_Overlap/HNRNPC_UPF1_ASevents.txt", quote = F, row.names = F, sep = "\t")
+
+regionRes <- sign.regions %>% dplyr::count(AS)
+regionRes$AS <- factor(regionRes$AS)
+regionRes$AS <- factor(regionRes$AS, levels = c("A5SS", "A3SS", "MXE", "SE", "RI"))
+
+regionRes <- regionRes %>% 
+  arrange(desc(AS)) %>%
+  mutate(prop = round((n / sum(regionRes$n))*100,1)) %>%
+  mutate(ypos = cumsum(prop)- 0.5*prop )
+
+piechart <- ggplot(regionRes, aes(x="", y=prop, fill=AS))+ geom_bar(width = 1, stat = "identity") +
+    coord_polar("y", start=0) +
+  theme_minimal()+
+  theme(
+  axis.title.x = element_blank(),
+  axis.title.y = element_blank(),
+  panel.border = element_blank(),
+  panel.grid=element_blank(),
+  axis.ticks = element_blank(),
+  plot.title=element_text(size=14, face="bold")
+  )+
+  theme(axis.text.x=element_blank()) +
+  geom_text(aes(y = ypos, label = prop), color = "black", size=2)
+
+piechart
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+#Save the plot as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/8_DTE_analysis/0_UPF1_HNRNPC/0_Overlap/PieChart_UPF1_HNRNPC.pdf", height = 5, width = 4)
+piechart
+dev.off()
+```
+
+```{r message=FALSE, warning=FALSE, fig.height=8, fig.width=9.5}
+#Get the genes
+AS_event <- sign.regions %>% mutate("gene_id" = sapply(strsplit(sign.regions$region, "_"), function(x) x[1])) 
+AS_event <- AS_event %>% mutate("geneID" = sapply(strsplit(AS_event$gene_id, "\\."), function(x) x[1]))
+
+set.seed(3)
+#Run GO analysis on UVC data
+A3SS.GO = gost(AS_event$geneID[AS_event$AS == "A3SS"], organism = "hsapiens")
+A5SS.GO = gost(AS_event$geneID[AS_event$AS == "A5SS"], organism = "hsapiens")
+MXE.GO  = gost(AS_event$geneID[AS_event$AS == "MXE"], organism = "hsapiens")
+SE.GO  = gost(AS_event$geneID[AS_event$AS == "SE"], organism = "hsapiens")
+RI.GO  = gost(AS_event$geneID[AS_event$AS == "RI"], organism = "hsapiens")
+
+A3SS.GO$result$AS <- "A3SS"
+A5SS.GO$result$AS <- "A5SS"
+MXE.GO$result$AS <- "MXE"
+SE.GO$result$AS <- "SE"
+RI.GO$result$AS <- "RI"
+
+gp.res <- rbind(A3SS.GO$result, A5SS.GO$result, MXE.GO$result, SE.GO$result, RI.GO$result)
+gp.res$AS <- factor(gp.res$AS, levels = c("A5SS", "A3SS", "MXE", "SE", "RI"))
+
+#Take top 20 terms for each source
+gp.res <- gp.res %>% group_by(AS, source) %>% dplyr::slice(1:10)
+gp.bp <- gp.res[gp.res$source %in% c("GO:BP", "GO:CC", "GO:MF"),]
+gp.bp$term_name <- factor(gp.bp$term_name, levels = unique(gp.bp$term_name))
+gp.bp$source <- factor(gp.bp$source, levels = unique(gp.bp$source))
+
+#Prepare the bubble plot
+ggplot(data = gp.bp, aes(x = source, y = term_name, color = -log10(p_value), size = intersection_size)) + 
+  geom_point() +
+  scale_color_viridis(option = "D") +
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  ylab("") + 
+  xlab("") +
+  theme(axis.text.y = element_text(vjust = 1, hjust=1))+
+  scale_y_discrete(limits=rev) + facet_grid(~AS)
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+# Save the bubble plot as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/8_DTE_analysis/0_UPF1_HNRNPC/0_Overlap/GO_AS.pdf", height = 8, width = 9.5)
+ggplot(data = gp.bp, aes(x = source, y = term_name, color = -log10(p_value), size = intersection_size)) + 
+  geom_point() +
+  scale_color_viridis(option = "D") +
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  ylab("") + 
+  xlab("") +
+  theme(axis.text.y = element_text(vjust = 1, hjust=1))+
+  scale_y_discrete(limits=rev) + facet_grid(~AS)
+dev.off()
+```
+
+# 2. Differential transcript expression analysis
+```{r warning=FALSE, message=FALSE}
+#Load salmon quant data
+dir <- "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/8_DTE_analysis/0_UPF1_HNRNPC/1_DTE/Salmon_20/counts"
+list.files(dir)
+sample <- c("ctrl_1h_1_quant","ctrl_1h_2_quant","hnrnpc_1h_1_quant","hnrnpc_1h_2_quant","upf1_1h_1_quant","upf1_1h_2_quant")
+
+coldata <- data.frame(condition = factor(rep(c("control", "KD_hnrnpc", "KD_upf1"), each = 2)), repl = factor(rep(c("1","2"),3)))
+coldata$names <- sample
+coldata$files <- file.path(dir, coldata$names, "quant.sf")
+all(file.exists(coldata$files))
+
+se <- tximeta(coldata, skipMeta = TRUE, skipSeqinfo = TRUE)
+assayNames(se)
+
+se <- scaleInfReps(se)
+se <- labelKeep(se)
+se <- se[mcols(se)$keep,]
+```
+
+Transcript-level analysis
+```{r warning=FALSE, message=FALSE, results='hide'}
+set.seed(1)
+#Load annotation
+txdb <- loadDb("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/8_DTE_analysis/0_UPF1_HNRNPC/1_DTE/Genome/gencode.v39.annotation.sqlite")
+k <- keys(txdb, keytype = "TXNAME")
+tx2gene <- AnnotationDbi::select(txdb, k, "GENEID", "TXNAME")
+
+#HNRNPC
+hnrnpc.se <- se[,se$condition %in% c("control","KD_hnrnpc")]
+hnrnpc.se$condition <- factor(hnrnpc.se$condition, levels=c("control","KD_hnrnpc"))
+
+hnrnpc.se <- swish(hnrnpc.se, x="condition")
+
+hnrnpc.dte.res <- as.data.frame(mcols(hnrnpc.se))
+hnrnpc.dte.res$TXNAME <- rownames(hnrnpc.dte.res)
+rownames(hnrnpc.dte.res) <- NULL
+hnrnpc.dte.res <- merge(hnrnpc.dte.res, tx2gene, by = "TXNAME")
+write.table(hnrnpc.dte.res, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/8_DTE_analysis/0_UPF1_HNRNPC/1_DTE/DTE_hnrnpc_results.txt", quote = FALSE, sep = "\t", row.names = FALSE)
+
+#UPF1
+UPF1.se <- se[,se$condition %in% c("control","KD_upf1")]
+UPF1.se$condition <- factor(UPF1.se$condition, levels=c("control","KD_upf1"))
+
+UPF1.se <- swish(UPF1.se, x="condition")
+
+UPF1.dte.res <- as.data.frame(mcols(UPF1.se))
+UPF1.dte.res$TXNAME <- rownames(UPF1.dte.res)
+rownames(UPF1.dte.res) <- NULL
+UPF1.dte.res <- merge(UPF1.dte.res, tx2gene, by = "TXNAME")
+write.table(UPF1.dte.res, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/8_DTE_analysis/0_UPF1_HNRNPC/1_DTE/DTE_upf1_results.txt", quote = FALSE, sep = "\t", row.names = FALSE)
+```
+
+```{r warning=FALSE, message=FALSE}
+#Get transcript names from rMATs output
+gtf <- rtracklayer::import('~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/8_DTE_analysis/0_UPF1_HNRNPC/1_DTE/Genome/gencode.v39.annotation.gtf')
+gtf_df=as.data.frame(gtf)
+
+#Splicing results
+AS_event <- sign.regions
+AS_event <- AS_event %>% mutate("gene_id" = sapply(strsplit(AS_event$region, "_"), function(x) x[1]),
+                                "gene_name"= sapply(strsplit(AS_event$region, "_"), function(x) x[2]), 
+                                "chr"= sapply(strsplit(AS_event$region, "_"), function(x) x[3]),
+                                "strand"= sapply(strsplit(AS_event$region, "_"), function(x) x[4]), 
+                                "start" = sapply(strsplit(AS_event$region, "_"), function(x) x[5]),
+                                "end"= sapply(strsplit(AS_event$region, "_"), function(x) x[6])) %>% dplyr::select(c(region,chr,start,end, strand, gene_id, gene_name, AS))
+
+AS_event_tx <- merge(AS_event %>% dplyr::select(region,gene_id,AS), gtf_df[gtf_df$type == "transcript",], by = "gene_id") %>% dplyr::select(c(seqnames,start,end,transcript_id, strand, gene_id, gene_name, AS))
+AS_event_bed <- AS_event %>% dplyr::select(chr, start, end, strand, region, gene_id, AS)
+AS_event_tx_bed <- AS_event_tx %>% dplyr::select(seqnames, start, end, strand, transcript_id, gene_id)
+
+#bedtools to get regions inside transcripts
+AS_event_tx2 <- bedtoolsr::bt.intersect(AS_event_bed, AS_event_tx_bed, loj = TRUE)
+AS_event_tx2 <- unique(AS_event_tx2)
+
+colnames(AS_event_tx2) <- c("AS_chr", "AS_start", "AS_end", "AS_strand", "AS_region", "AS_geneID", "AS_event", "TX_chr", "TX_start", "TX_end", "TX_strand", "TX_id", "TX_geneID")
+AS_event_tx2 <- AS_event_tx2 %>% mutate(geneIDmatch = case_when(AS_geneID != TX_geneID  ~ "0",AS_geneID == TX_geneID ~ "1"))
+AS_event_tx2 <- subset(AS_event_tx2, geneIDmatch > 0)
+
+write.table(AS_event_tx2, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/8_DTE_analysis/0_UPF1_HNRNPC/1_DTE/AS_HNRNPC_UPF1_transcripts.txt", quote = FALSE, row.names = FALSE, sep = "\t")
+
+#Prepare DTE results
+logfc.hnrnpc <- hnrnpc.dte.res %>% dplyr::select(TXNAME, log2FC, qvalue)
+logfc.upf1 <- UPF1.dte.res %>% dplyr::select(TXNAME, log2FC, qvalue)
+
+colnames(logfc.hnrnpc) <- c("TX_id", "hnrnpc_logfc", "hnrnpc_qvalue")
+colnames(logfc.upf1) <- c("TX_id", "upf1_logfc", "upf1_qvalue")
+
+logfc.table.vsupf1 <- merge(logfc.hnrnpc, logfc.upf1, by = "TX_id")
+logfc.table.vsupf1.sign <- subset(logfc.table.vsupf1, hnrnpc_qvalue < 0.05 & upf1_qvalue < 0.05)
+
+#Merge logfc table with rMATs transcript
+as.tr.fc <- merge(logfc.table.vsupf1.sign, unique(AS_event_tx2 %>% dplyr::select(TX_id, TX_geneID, AS_event)), by = "TX_id")
+write.table(as.tr.fc, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/8_DTE_analysis/0_UPF1_HNRNPC/1_DTE/AS_HNRNPC_UPF1_logFC_high_sign.txt", quote = FALSE, row.names = FALSE, sep = "\t")
+
+#Regression analysis
+all <- setdiff(logfc.table.vsupf1.sign$TX_id, as.tr.fc$TX_id)
+logfc.table.vsupf1.sign2 <- subset(logfc.table.vsupf1.sign, TX_id %in% all)
+logfc.table.vsupf1.sign2$AS_event <- "general"
+logfc.table.vsupf1.sign2$type <- "general"
+
+as.tr.fc.plot <- as.tr.fc
+as.tr.fc.plot$type <- "AS_event"
+
+model <- rlm(upf1_logfc ~ hnrnpc_logfc, data = logfc.table.vsupf1.sign2)
+model2 <- rlm(upf1_logfc ~ hnrnpc_logfc, data = as.tr.fc.plot)
+
+rlm_rsquare <- function(model) {
+#Extract the weights and residuals
+weights <- model$w
+residuals <- model$resid
+fitted_values <- model$fitted.values
+response <- logfc.table.vsupf1.sign2$upf1_logfc
+
+#Calculate the weighted R-squared
+weighted_ss_residuals <- sum(weights * residuals^2)
+weighted_ss_total <- sum(weights * (response - mean(response))^2)
+weighted_r_squared <- 1 - (weighted_ss_residuals / weighted_ss_total)
+
+return(weighted_r_squared)
+}
+model.rsquare <- rlm_rsquare(model)
+model2.rsquare <- rlm_rsquare(model2)
+
+chow.test <- gap::chow.test(y1=logfc.table.vsupf1.sign2$upf1_logfc,x1=logfc.table.vsupf1.sign2$hnrnpc_logfc,y2=as.tr.fc.plot$upf1_logfc,x2=as.tr.fc.plot$hnrnpc_logfc)
+model.res <- data.frame(general = model.rsquare, AS_event = model2.rsquare, chow.pvalue = chow.test[[4]])
+write.table(model.res, "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/8_DTE_analysis/0_UPF1_HNRNPC/1_DTE/Chowtest_allASevents.txt", quote = F, sep = "\t")
+
+as.tr.fc.plot <- rbind(logfc.table.vsupf1.sign2, as.tr.fc.plot %>% dplyr::select(-TX_geneID))
+as.tr.fc.plot$AS_event <- factor(as.tr.fc.plot$AS_event)
+
+#Generate the scatter plot
+ggplot3 <- ggplot(data=as.tr.fc.plot, aes(x=hnrnpc_logfc, y=upf1_logfc, group=type)) + 
+  geom_point(aes(color = AS_event, size = AS_event)) +
+  scale_size_manual(values=c(1.5,1.5,0.5,1.5,1.5,1.5))+
+  geom_smooth(aes(group=type, color=type), method='rlm', formula= y~x, size=0.5, fullrange=TRUE) +
+  scale_color_manual(values = c(A3SS = "#7959b7", A5SS = "#00b7e6", general = "grey", MXE = "#ff955e", RI = "#f25a5f", SE = "#4487ab")) +
+  annotate(geom="text", x=-5, y=6, label=round(model.rsquare,2), color="black") +
+  annotate(geom="text", x=-5, y=5.5, label=round(model2.rsquare,2), color="#f25a5f") +
+  xlim(-8, 8) +
+  ylim(-8, 8) +
+  theme_linedraw() + theme(panel.grid.major = element_blank(), legend.position = "bottom", 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_blank()) + ggtitle("Correlation of DE common HNRNPC-KD/UPF1-KD AS transcripts")
+ggplot3 <- ggMarginal(ggplot3, groupColour = TRUE, groupFill = TRUE, type="density", alpha=0.6, size = 5)
+```
+
+```{r  warning=FALSE, message=FALSE, fig.height=6, fig.width=5}
+ggplot3
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+#Save the plot as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/8_DTE_analysis/0_UPF1_HNRNPC/1_DTE/Regression_DTE_HNRNPC_UPF1.pdf", height = 6, width = 5)
+ggplot3
+dev.off()
+```
+
+##Cumulative fraction of AS events
+```{r  warning=FALSE, message=FALSE, fig.height=7, fig.width=5}
+#Cumulative fraction of UPF1 RI
+as.tr.fc.cdf <- as.tr.fc.plot %>% dplyr::select(TX_id, hnrnpc_logfc, AS_event) %>% dplyr::rename(logfc = hnrnpc_logfc)
+as.tr.fc.cdf$rbp <- "HNRNPC-KD"
+
+as.tr.fc.cdf2 <- as.tr.fc.plot %>% dplyr::select(TX_id, upf1_logfc, AS_event) %>% dplyr::rename(logfc = upf1_logfc)
+as.tr.fc.cdf2$rbp <- "UPF1-KD"
+
+as.tr.fc.cdf <- rbind(as.tr.fc.cdf, as.tr.fc.cdf2)
+
+cdf <- ggplot(data=as.tr.fc.cdf, aes(x=logfc, group=AS_event, colour=AS_event)) +
+  stat_ecdf() +
+  ggtitle("Cumulative fraction of common HNRNPC-KD/UPF1-KD AS transcripts") +
+  scale_color_manual(values = c(A3SS = "#7959b7", A5SS = "#00b7e6", general = "grey", MXE = "#ff955e", RI = "#f25a5f", SE = "#4487ab")) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_blank(),
+        plot.title = element_text(hjust = 0.5)) + facet_grid(rows=vars(rbp))
+
+cdf
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+#Save the plot as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/8_DTE_analysis/0_UPF1_HNRNPC/1_DTE/ECDF_DTE_HNRNPC_UPF1.pdf", height = 7, width = 5)
+cdf
+dev.off()
+```
+
+```{r warning=FALSE, message=FALSE}
+#KS test
+hnrncp.kstest <- data.frame( ks.pvalue =  c(ks.test(as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "general" & as.tr.fc.cdf$rbp == "HNRNPC-KD"], as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "RI" & as.tr.fc.cdf$rbp == "HNRNPC-KD"] , alternative = 'greater')[["p.value"]], 
+              ks.test(as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "general" & as.tr.fc.cdf$rbp == "HNRNPC-KD"], as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "A3SS" & as.tr.fc.cdf$rbp == "HNRNPC-KD"] , alternative = 'greater')[["p.value"]],
+              ks.test(as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "general" & as.tr.fc.cdf$rbp == "HNRNPC-KD"], as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "A5SS" & as.tr.fc.cdf$rbp == "HNRNPC-KD"] , alternative = 'greater')[["p.value"]], 
+              ks.test(as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "general" & as.tr.fc.cdf$rbp == "HNRNPC-KD"], as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "SE" & as.tr.fc.cdf$rbp == "HNRNPC-KD"] , alternative = 'greater')[["p.value"]], 
+              ks.test(as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "general" & as.tr.fc.cdf$rbp == "HNRNPC-KD"], as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "MXE" & as.tr.fc.cdf$rbp == "HNRNPC-KD"] , alternative = 'greater')[["p.value"]]), type = c("RI", "A3SS", "A5SS", "SE", "MXE"))
+
+UPF1.kstest <- data.frame( ks.pvalue =  c(ks.test(as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "general" & as.tr.fc.cdf$rbp == "UPF1-KD"], as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "RI" & as.tr.fc.cdf$rbp == "UPF1-KD"] , alternative = 'greater')[["p.value"]], 
+              ks.test(as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "general" & as.tr.fc.cdf$rbp == "UPF1-KD"], as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "A3SS" & as.tr.fc.cdf$rbp == "UPF1-KD"] , alternative = 'greater')[["p.value"]],
+              ks.test(as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "general" & as.tr.fc.cdf$rbp == "UPF1-KD"], as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "A5SS" & as.tr.fc.cdf$rbp == "UPF1-KD"] , alternative = 'greater')[["p.value"]], 
+              ks.test(as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "general" & as.tr.fc.cdf$rbp == "UPF1-KD"], as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "SE" & as.tr.fc.cdf$rbp == "UPF1-KD"] , alternative = 'greater')[["p.value"]], 
+              ks.test(as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "general" & as.tr.fc.cdf$rbp == "UPF1-KD"], as.tr.fc.cdf$logfc[as.tr.fc.cdf$AS_event == "MXE" & as.tr.fc.cdf$rbp == "UPF1-KD"] , alternative = 'greater')[["p.value"]]), type = c("RI", "A3SS", "A5SS", "SE", "MXE"))
+
+hnrncp.kstest
+UPF1.kstest
+```
+
+All the visualizations were saved as pdf and modified in illustrator.
+
+```{r}
+sessionInfo()
+```
+
+
+
