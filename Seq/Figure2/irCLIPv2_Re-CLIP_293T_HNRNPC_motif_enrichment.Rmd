@@ -1,0 +1,593 @@
+---
+title: "irCLIPv2 and Re-CLIP modeling for HNRNPC and the RDAPs ELAVL1, KHSRP, HNRNPM"
+author: "Luca Ducoli"
+output:
+  pdf_document: 
+    latex_engine: xelatex
+    pandoc_args: --listings
+    includes:
+      in_header: preamble.tex
+  html_document:
+    df_print: paged
+---
+
+This is the pipeline used to compare the irCLIPv2 and Re-CLIP datasets of HNRNPC and ELAVL1, KHSRP, HNRNPM to uncover biochemical insights not inferred by simple primary CLIP.
+
+# 1. Determine the log2FC vs. no-UV of irCLIPv2 and Re-CLIP samples across HNRNPC and RDAPs union sets
+```{r warning=FALSE, message=FALSE}
+library(tidyverse)
+library(Repitools)
+library(AnnotationHub)
+library(AnnotationDbi)
+library(ggplot2)
+library(plyranges)
+library(GenomicRanges)
+library(gintools)
+library(rtracklayer)
+library(EnrichedHeatmap)
+library(circlize)
+library(caTools)
+library(cliProfiler)
+library(paletteer)
+library(gridExtra)
+library(NbClust)
+library(RColorBrewer)
+library(ChIPpeakAnno)
+library(data.table) 
+library(BRGenomics)
+library(DESeq2)
+library(ggpmisc)
+library(eulerr)
+library(memes)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(universalmotif)
+library(SLIMFinderR)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(gprofiler2)
+library(ggraph)
+library(ggpointdensity)
+library(ggpubr)
+library(ggridges)
+library(scales)
+library(viridis)
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+#Get binding sites for HNRNPC
+all <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/1_Subzones/3_Categorization/3_pvalue_0.05_fc1/All_RBP_categorization.txt", header = TRUE)
+all <- subset(all, chromosome != "chrM" & gene_type == "protein_coding" & category_all %in% c("med", "high"))
+all <- all %>% mutate(max_id = if_else(max_S2_fc > max_S3_fc, max_S2_id, max_S3_id),
+                      max_begin = if_else(max_S2_fc > max_S3_fc, begin_S2, begin_S3),
+                      max_end = if_else(max_S2_fc > max_S3_fc, end_S2, end_S3))
+
+#Generate granges for HNRNPC
+all.gr <- GRanges(all$chromosome,
+                  IRanges(start=all$begin_S1,
+                          end=all$end_S1),
+                  strand = all$region_strand,
+                regionID = all$max_id)
+all.gr <- unique_granges(all.gr)
+all.gr$regionStartId <- paste("Region", 1:nrow(mcols(all.gr)), sep = "_")
+all.gr <- unique_granges(all.gr)
+
+# Add binary columns representing overlap with single RBP granges
+for (i in 1:length(unique(all$rbp))) {
+  RBP.bdg <- subset(all, rbp == unique(all$rbp)[i])
+  RBP.gr <- GRanges(RBP.bdg$chromosome,
+                    IRanges(start=RBP.bdg$begin_S1,
+                            end=RBP.bdg$end_S1),
+                    geneID = RBP.bdg$gene_id,
+                    strand = RBP.bdg$region_strand,
+                  regionID = RBP.bdg$max_id)
+  RBP.gr <- unique_granges(RBP.gr)
+  overlaps <- all.gr$regionID %in% RBP.gr$regionID
+  overlaps <- as.integer(overlaps)
+  new_col <- DataFrame(overlaps)
+    names(new_col) <- unique(all$rbp)[i]
+  mcols(all.gr) <- cbind(mcols(all.gr), new_col)
+}
+
+get_total_region <- function(all.gr, rbp1, rbp2, section) {
+  subset_expr <- parse(text = paste0("HNRNPC == 1 | ", rbp1, " == 1"))
+  u <-  subset(all.gr, eval(subset_expr))
+  #Get total signal
+  gr.p <- subset(u, strand == "+")
+  gr.p$width_region <- end(gr.p) - start(gr.p)
+  gr.m <- subset(u, strand == "-")
+  gr.m$width_region <- end(gr.m) - start(gr.m)
+  
+  #Load bigwigfile
+  dir <- "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/2_293T_reclip/1_Bigwig/"
+  bw.reRBP.r1.p <- import.bw(paste(dir, rbp2, "_293T-hnC_", section, "_R1.p.bw", sep = ""))
+  bw.reRBP.r1.m <- import.bw(paste(dir, rbp2, "_293T-hnC_", section,"_R1.m.bw", sep = ""))
+  bw.reRBP.r2.p <- import.bw(paste(dir, rbp2, "_293T-hnC_", section,"_R2.p.bw", sep = ""))
+  bw.reRBP.r2.m <- import.bw(paste(dir, rbp2, "_293T-hnC_", section,"_R2.m.bw", sep = ""))
+  
+  bw.reIgG.r1.p <- import.bw(paste(dir, "IgG_A431-hnC_EGF0_R1.p.bw", sep = ""))
+  bw.reIgG.r1.m <- import.bw(paste(dir, "IgG_A431-hnC_EGF0_R1.m.bw", sep = ""))
+  bw.reIgG.r2.p <- import.bw(paste(dir, "IgG_A431-hnC_EGF0_R2.p.bw", sep = ""))
+  bw.reIgG.r2.m <- import.bw(paste(dir, "IgG_A431-hnC_EGF0_R2.m.bw", sep = ""))
+  
+  dir <- "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/1_Subzones/1_Bigwig/"
+  bw.HNRNPCnoUV.r1.p <- import.bw(paste(dir, "HNRNPC_293T_noUV_R1.p.bw", sep = ""))
+  bw.HNRNPCnoUV.r1.m <- import.bw(paste(dir, "HNRNPC_293T_noUV_R1.m.bw", sep = ""))
+  bw.HNRNPCnoUV.r2.p <- import.bw(paste(dir, "HNRNPC_293T_noUV_R2.p.bw", sep = ""))
+  bw.HNRNPCnoUV.r2.m <- import.bw(paste(dir, "HNRNPC_293T_noUV_R2.m.bw", sep = ""))
+  
+  bw.HNRNPC.S2.r1.p <- import.bw(paste(dir, "HNRNPC_293T_UVC_S2_R1.p.bw", sep = ""))
+  bw.HNRNPC.S2.r1.m <- import.bw(paste(dir, "HNRNPC_293T_UVC_S2_R1.m.bw", sep = ""))
+  bw.HNRNPC.S2.r2.p <- import.bw(paste(dir, "HNRNPC_293T_UVC_S2_R2.p.bw", sep = ""))
+  bw.HNRNPC.S2.r2.m <- import.bw(paste(dir, "HNRNPC_293T_UVC_S2_R2.m.bw", sep = ""))
+  
+  bw.HNRNPC.S3.r1.p <- import.bw(paste(dir, "HNRNPC_293T_UVC_S3_R1.p.bw", sep = ""))
+  bw.HNRNPC.S3.r1.m <- import.bw(paste(dir, "HNRNPC_293T_UVC_S3_R1.m.bw", sep = ""))
+  bw.HNRNPC.S3.r2.p <- import.bw(paste(dir, "HNRNPC_293T_UVC_S3_R2.p.bw", sep = ""))
+  bw.HNRNPC.S3.r2.m <- import.bw(paste(dir, "HNRNPC_293T_UVC_S3_R2.m.bw", sep = ""))
+  
+  bw.RBPnoUV.r1.p <- import.bw(paste(dir, rbp1, "_293T_noUV_R1.p.bw", sep = ""))
+  bw.RBPnoUV.r1.m <- import.bw(paste(dir, rbp1, "_293T_noUV_R1.m.bw", sep = ""))
+  bw.RBPnoUV.r2.p <- import.bw(paste(dir, rbp1, "_293T_noUV_R2.p.bw", sep = ""))
+  bw.RBPnoUV.r2.m <- import.bw(paste(dir, rbp1, "_293T_noUV_R2.m.bw", sep = ""))
+  
+  bw.RBP.S2.r1.p <- import.bw(paste(dir, rbp1, "_293T_UVC_S2_R1.p.bw", sep = ""))
+  bw.RBP.S2.r1.m <- import.bw(paste(dir, rbp1, "_293T_UVC_S2_R1.m.bw", sep = ""))
+  bw.RBP.S2.r2.p <- import.bw(paste(dir, rbp1, "_293T_UVC_S2_R2.p.bw", sep = ""))
+  bw.RBP.S2.r2.m <- import.bw(paste(dir, rbp1, "_293T_UVC_S2_R2.m.bw", sep = ""))
+  
+  bw.RBP.S3.r1.p <- import.bw(paste(dir, rbp1, "_293T_UVC_S3_R1.p.bw", sep = ""))
+  bw.RBP.S3.r1.m <- import.bw(paste(dir, rbp1, "_293T_UVC_S3_R1.m.bw", sep = ""))
+  bw.RBP.S3.r2.p <- import.bw(paste(dir, rbp1, "_293T_UVC_S3_R2.p.bw", sep = ""))
+  bw.RBP.S3.r2.m <- import.bw(paste(dir, rbp1, "_293T_UVC_S3_R2.m.bw", sep = ""))
+  
+  #Count total signal across union regions
+  gr.p$RBP_reclip_1 <- getCountsByRegions(bw.reRBP.r1.p, gr.p)
+  gr.p$RBP_reclip_2 <- getCountsByRegions(bw.reRBP.r2.p, gr.p)
+  gr.p$IgG_reclip_1 <- getCountsByRegions(bw.reIgG.r1.p, gr.p)
+  gr.p$IgG_reclip_2 <- getCountsByRegions(bw.reIgG.r2.p, gr.p)
+  gr.p$HNRNPC_UVC_1 <- getCountsByRegions(bw.HNRNPC.S3.r1.p, gr.p) + getCountsByRegions(bw.HNRNPC.S2.r1.p, gr.p)
+  gr.p$HNRNPC_UVC_2 <- getCountsByRegions(bw.HNRNPC.S3.r2.p, gr.p) + getCountsByRegions(bw.HNRNPC.S2.r2.p, gr.p)
+  gr.p$HNRNPC_noUV_1 <- getCountsByRegions(bw.HNRNPCnoUV.r1.p, gr.p)
+  gr.p$HNRNPC_noUV_2 <- getCountsByRegions(bw.HNRNPCnoUV.r2.p, gr.p)
+  gr.p$RBP_UVC_1 <- getCountsByRegions(bw.RBP.S3.r1.p, gr.p) + getCountsByRegions(bw.RBP.S2.r1.p, gr.p)
+  gr.p$RBP_UVC_2 <- getCountsByRegions(bw.RBP.S3.r2.p, gr.p) + getCountsByRegions(bw.RBP.S2.r2.p, gr.p)
+  gr.p$RBP_noUV_1 <- getCountsByRegions(bw.RBPnoUV.r1.p, gr.p)
+  gr.p$RBP_noUV_2 <- getCountsByRegions(bw.RBPnoUV.r2.p, gr.p)
+  
+  gr.m$RBP_reclip_1 <- getCountsByRegions(bw.reRBP.r1.m, gr.m)
+  gr.m$RBP_reclip_2 <- getCountsByRegions(bw.reRBP.r2.m, gr.m)
+  gr.m$IgG_reclip_1 <- getCountsByRegions(bw.reIgG.r1.m, gr.m)
+  gr.m$IgG_reclip_2 <- getCountsByRegions(bw.reIgG.r2.m, gr.m)
+  gr.m$HNRNPC_UVC_1 <- getCountsByRegions(bw.HNRNPC.S3.r1.m, gr.m) + getCountsByRegions(bw.HNRNPC.S2.r1.m, gr.m)
+  gr.m$HNRNPC_UVC_2 <- getCountsByRegions(bw.HNRNPC.S3.r2.m, gr.m) + getCountsByRegions(bw.HNRNPC.S2.r2.m, gr.m)
+  gr.m$HNRNPC_noUV_1 <- getCountsByRegions(bw.HNRNPCnoUV.r1.m, gr.m)
+  gr.m$HNRNPC_noUV_2 <- getCountsByRegions(bw.HNRNPCnoUV.r2.m, gr.m)
+  gr.m$RBP_UVC_1 <- getCountsByRegions(bw.RBP.S3.r1.m, gr.m) + getCountsByRegions(bw.RBP.S2.r1.m, gr.m)
+  gr.m$RBP_UVC_2 <- getCountsByRegions(bw.RBP.S3.r2.m, gr.m) + getCountsByRegions(bw.RBP.S2.r2.m, gr.m)
+  gr.m$RBP_noUV_1 <- getCountsByRegions(bw.RBPnoUV.r1.m, gr.m)
+  gr.m$RBP_noUV_2 <- getCountsByRegions(bw.RBPnoUV.r2.m, gr.m)
+  
+  #Merge replicates
+  gr <- bind_ranges(gr.p, gr.m)
+  
+  reclip_reg <- as.data.frame(mcols(gr)[-c(1)])
+  return(list(reclip = reclip_reg, union = u))  
+}
+
+ELAVL1 <- get_total_region(all.gr, "ELAVL1", "HuR", "110-350")
+KHSRP <- get_total_region(all.gr, "KHSRP", "KHSRP", "140-350")
+HNRNPM <- get_total_region(all.gr, "HNRNPM", "HNRNPM", "140-350")
+
+# Get log2FC values against no-UV
+get_results <- function(mat) {
+  reclip_reg_mat <- mat[,-c(1:10)]
+  rownames(reclip_reg_mat) <- mat$regionStartId
+  reclip_design <- data.frame(label = colnames(reclip_reg_mat), replicate = rep(c("1", "2"), 6), condition = rep(c("reRBP", "IgG", "HNRNPC", "Control", "RBP", "Control"), each = 2))
+  
+  dds <- DESeqDataSetFromMatrix(reclip_reg_mat, reclip_design, ~ condition)
+  dds <- estimateSizeFactors(dds)
+  normalized_counts <- as.data.frame(counts(dds, normalized=TRUE))
+  dds <- DESeq(dds)
+  resHNRNPC <- as.data.frame(results(dds, contrast = list("condition_HNRNPC_vs_Control")))
+  resreRBP <- as.data.frame(results(dds, contrast = list("condition_reRBP_vs_Control")))
+  resIgG <- as.data.frame(results(dds, contrast = list("condition_IgG_vs_Control")))
+  resRBP <- as.data.frame(results(dds, contrast = list("condition_RBP_vs_Control")))
+  res_all <- cbind(resHNRNPC %>% dplyr::select(baseMean, log2FoldChange, lfcSE) %>% mutate(zscore = log2FoldChange/lfcSE), 
+                   resRBP %>% dplyr::select(log2FoldChange, lfcSE) %>% mutate(zscore = log2FoldChange/lfcSE), 
+                   resreRBP %>% dplyr::select(log2FoldChange, lfcSE) %>% mutate(zscore = log2FoldChange/lfcSE), 
+                   resIgG %>% dplyr::select(log2FoldChange, lfcSE) %>% mutate(zscore = log2FoldChange/lfcSE))
+  colnames(res_all) <- c("baseMean", "HNRNPC", "HNRNPC_SE", "HNRNPC_zscore","RBP", "RBP_SE", "RBP_zscore", "reRBP", "reRBP_SE", "reRBP_zscore", "IgG", "IgG_SE", "IgG_zscore")
+  
+  res_all$score <- res_all$HNRNPC + res_all$RBP
+  res_all$scoreZ <- res_all$HNRNPC_zscore + res_all$RBP_zscore
+  return(res_all)
+}
+
+ELAVL1_res <- get_results(ELAVL1$reclip)
+KHSRP_res <- get_results(KHSRP$reclip)
+HNRNPM_res <- get_results(HNRNPM$reclip)
+
+#Filter low-expressed regions
+ELAVL1_res <- subset(ELAVL1_res, baseMean > 2)
+KHSRP_res <- subset(KHSRP_res, baseMean > 2)
+HNRNPM_res <- subset(HNRNPM_res, baseMean > 2)
+```
+
+# 2. Generate the model
+```{r message=FALSE, warning=FALSE, fig.height=5, fig.width=20}
+mod_vis <- function(res, a) {
+  model <- lm(reRBP ~ HNRNPC+RBP, data = res)
+  res$predRBP <- predict(model)
+
+  tile <- res %>% mutate(bin = ntile(HNRNPC, n = 30), bin2 = ntile(RBP, n = 30))
+  tile <- tile %>% group_by(bin, bin2) %>% summarize(count = n(), mean_value = mean(reRBP, na.rm = TRUE)) 
+  plot <- ggplot(tile, aes(x = bin, y = bin2, fill = mean_value)) +
+  geom_tile() +
+  scale_fill_viridis() +
+  coord_fixed() +
+  theme_linedraw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_blank())+
+  xlab("HNRNPC irCLIPv2 bin") + ylab(paste(a, " irCLIPv2 bin", sep ="")) 
+  
+  res2 <- res %>% dplyr::select(predRBP, IgG, reRBP) %>% mutate(type = rep("reclip", rep = nrow(res)), type2 = rep("IgG", rep = nrow(res)))
+
+  res2 <- rbind(res2 %>% dplyr::select(predRBP, reRBP, type) %>% dplyr::rename(actualscore = reRBP), 
+                     res2 %>% dplyr::select(predRBP, IgG, type2) %>% dplyr::rename(actualscore = IgG, type = type2))
+
+  fit <- lm(reRBP ~ predRBP, data = res)
+  fit2 <- lm(IgG ~ predRBP, data = res)
+  
+  plot1 <- ggplot(res2, aes(x=predRBP, y=actualscore)) + 
+    geom_hline(yintercept=0, linetype="dashed", color = "black") +
+    geom_vline(xintercept=0, linetype="dashed", color = "black") +
+    geom_pointdensity(size=0.005) +
+    geom_density_2d() +
+    scale_color_viridis(trans = "log10") +
+    geom_smooth(method = "lm") +
+    stat_cor(   aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~"))) +
+    geom_abline(data = dplyr::filter(res2, type == "reclip"), intercept = coef(fit)[1], slope = coef(fit)[2], color = "blue", linetype="dashed") +
+    geom_abline(data = dplyr::filter(res2, type == "IgG"), intercept = coef(fit2)[1], slope = coef(fit2)[2], color = "red", linetype="dashed") +
+    xlim(-9,9) +
+    ylim(-9,9) +
+    theme_linedraw() + facet_wrap(~type) + xlab("Expected ReCLIP score") + ylab("Observed Re-CLIP score") + ggtitle(a) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_blank())
+
+  return(list(plot = plot, plot1 = plot1, fit = fit, fit2 = fit2, model = model))
+}
+  
+
+ELAVL1_plot <- mod_vis(ELAVL1_res, "ELAVL1")
+KHSRP_plot <- mod_vis(KHSRP_res, "KHSRP")
+HNRNPM_plot <- mod_vis(HNRNPM_res, "HNRNPM")
+
+ggarrange(ELAVL1_plot$plot, KHSRP_plot$plot, HNRNPM_plot$plot,   ncol = 3)
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/2_293T_reclip/4_ReCLIPvsCLIP/noUV_all_max2/Surface_plot.pdf", width = 20, height = 5)
+ggarrange(ELAVL1_plot$plot, KHSRP_plot$plot, HNRNPM_plot$plot,   ncol = 3)
+dev.off()
+```
+
+```{r message=FALSE, warning=FALSE, fig.height=4, fig.width=23}
+ggarrange(ELAVL1_plot$plot1, KHSRP_plot$plot1, HNRNPM_plot$plot1,   ncol = 3)
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+pdf("/Users/lducoli/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/2_293T_reclip/4_ReCLIPvsCLIP/noUV_all_max2/Regression_analysis_plot.pdf", width = 23, height = 4)
+ggarrange(ELAVL1_plot$plot1, KHSRP_plot$plot1, HNRNPM_plot$plot1,   ncol = 3)
+dev.off()
+```
+
+# 3. Genome feature analysis
+```{r message=FALSE, warning=FALSE, fig.height=5, fig.width=6}
+#Load annotation
+txdb <- loadDb("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/1_Subzones/0_Annotation/gencode.v39.annotation")
+
+ELAVL1_residuals <- cbind(data.frame(residuals(ELAVL1_plot$fit)), data.frame(residuals(ELAVL1_plot$fit2)))
+colnames(ELAVL1_residuals) <- c("fit1", "fit2")
+KHSRP_residuals <- cbind(data.frame(residuals(KHSRP_plot$fit)), data.frame(residuals(KHSRP_plot$fit2)))
+colnames(KHSRP_residuals) <- c("fit1", "fit2")
+HNRNPM_residuals <- cbind(data.frame(residuals(HNRNPM_plot$fit)), data.frame(residuals(HNRNPM_plot$fit2)))
+colnames(HNRNPM_residuals) <- c("fit1", "fit2")
+
+density_features <- function(RBP_residuals, a, resid,type) {
+#Create a granges for all RBPs
+residuals <- RBP_residuals
+residuals$fit3 <- resid
+residuals <- residuals %>% arrange(-fit3)
+datam.gr <- subset(all.gr,  regionStartId %in% rownames(residuals))
+datam.gr <- datam.gr[order(match(datam.gr$regionStartId, rownames(residuals)))]
+datam.gr$residuals <- residuals$fit3
+
+#Generate the plot for the annotation
+dist <- genomicElementDistribution(datam.gr, TxDb = txdb, promoterRegion=c(upstream=2000, downstream=0), geneDownstream=c(upstream=0, downstream=2000), ignore.strand = FALSE, plot = FALSE)
+
+data <- mcols(dist$peaks)
+data$Exons <- str_replace(data$Exons, 'undefined', 'Intron')
+data$Exons <- str_replace(data$Exons, 'otherExon', 'Exon')
+data$Exons <- str_replace(data$Exons, 'CDS', 'Exon')
+
+data$Exons <- factor(data$Exons, levels = c("utr5", "Exon", "Intron", "utr3"))
+data$Exp <- type
+data$rbp <- a
+return(data)
+}
+
+ELAVL1_ds <- density_features(ELAVL1_residuals, "ELAVL1", ELAVL1_residuals$fit1, "Re_CLIP")
+KHSRP_ds <- density_features(KHSRP_residuals, "KHSRP", KHSRP_residuals$fit1, "Re_CLIP")
+HNRNPM_ds <- density_features(HNRNPM_residuals, "HNRNPM", HNRNPM_residuals$fit1, "Re_CLIP")
+
+ELAVL1_ds2 <- density_features(ELAVL1_residuals, "ELAVL1", ELAVL1_residuals$fit2, "IgG")
+KHSRP_ds2 <- density_features(KHSRP_residuals, "KHSRP", KHSRP_residuals$fit2, "IgG")
+HNRNPM_ds2 <- density_features(HNRNPM_residuals, "HNRNPM", HNRNPM_residuals$fit2, "IgG")
+
+data_density <- rbind(ELAVL1_ds, KHSRP_ds, HNRNPM_ds, ELAVL1_ds2, KHSRP_ds2, HNRNPM_ds2)
+data_density$rbp <- factor(data_density$rbp, levels = c("ELAVL1", "KHSRP", "HNRNPM"))
+my_pal <- c("Intron" = "#ff3048", "utr5" = "#000006", "Exon" = "#2256ca", "utr3" = "#9c9b9b")
+plot <- ggplot(data=data_density, aes(x=residuals, group=Exons, color = Exons)) +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    geom_density(adjust=1.25) + scale_color_manual(values = my_pal)  +
+  theme_linedraw() + facet_grid(rbp ~ Exp) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_blank()) +  xlim(-6, 6)
+plot
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/2_293T_reclip/4_ReCLIPvsCLIP/noUV_all_max2/Density_genomic_features_plot.pdf", width = 6, height = 5)
+plot
+dev.off()
+```
+
+# 4. Ranked motif enrichment analysis
+```{r message=FALSE, warning=FALSE}
+human.genome <- BSgenome.Hsapiens.UCSC.hg38
+
+#Load and prepare database 
+meme_db <- read_meme("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/1_Subzones/0_Annotation/motif/all.meme")
+meme_db_df <- meme_db %>% to_df()
+meme_db_df$altname <- sapply(strsplit(meme_db_df$name, "_"), function(x) x[1])
+gene <- unique(meme_db_df$altname)
+
+motif_list <- list()
+for (i in 1:length(gene)) {
+meme <- meme_db_df %>%  dplyr::filter(altname == gene[i]) %>% remove_duplicate_motifs()
+motif_list[[i]] <- meme
+}
+meme_db_df_dedup <- motif_list %>% dplyr::bind_rows(.id = "altname") 
+meme_db_df_dedup$altname <- sapply(strsplit(meme_db_df_dedup$name, "_"), function(x) x[1])
+meme_db_new <- meme_db_df_dedup %>% to_list()
+
+#Generate granges
+granges_residuals <- function(residuals, a, resid) {
+# residuals <- ELAVL1_residuals
+residuals$fit3 <- resid
+residuals <- residuals %>% arrange(-fit3)
+datam.gr <- subset(all.gr,  regionStartId %in% rownames(residuals))
+datam.gr <- datam.gr[order(match(datam.gr$regionStartId, rownames(residuals)))]
+datam.gr$residuals <- -1*residuals$fit3
+names(datam.gr) <- datam.gr$regionStartId
+datam.gr$rbp_category <- a
+return(datam.gr)
+}
+
+ELAVL1_resid.gr <- granges_residuals(ELAVL1_residuals, "ELAVL1_ReCLIP", ELAVL1_residuals$fit1)
+KHSRP_resid.gr <- granges_residuals(KHSRP_residuals, "KHSRP_ReCLIP", KHSRP_residuals$fit1)
+HNRNPM_resid.gr <- granges_residuals(HNRNPM_residuals, "HNRNPM_ReCLIP", HNRNPM_residuals$fit1)
+ELAVL1_resid2.gr <- granges_residuals(ELAVL1_residuals, "ELAVL1_IgG", ELAVL1_residuals$fit2)
+KHSRP_resid2.gr <- granges_residuals(KHSRP_residuals, "KHSRP_IgG", KHSRP_residuals$fit2)
+HNRNPM_resid2.gr <- granges_residuals(HNRNPM_residuals, "HNRNPM_IgG", HNRNPM_residuals$fit2)
+resid.gr <- bind_ranges(ELAVL1_resid.gr, KHSRP_resid.gr, HNRNPM_resid.gr, ELAVL1_resid2.gr, KHSRP_resid2.gr, HNRNPM_resid2.gr)
+
+expandRange = function(x, upstream, downstream) {
+  strand_is_minus = strand(x) == "-"
+  on_plus = which(!strand_is_minus)
+  on_minus = which(strand_is_minus)
+  start(x)[on_plus] = start(x)[on_plus] - upstream
+  start(x)[on_minus] = start(x)[on_minus] - downstream
+  end(x)[on_plus] = end(x)[on_plus] + downstream
+  end(x)[on_minus] = end(x)[on_minus] + upstream
+  return(x)
+}
+
+ame_analysis <- function(gr, upstream, downstream, width) {
+gr <- gr %>% expandRange(upstream = upstream, downstream = downstream)
+
+#Get sequence for motif analysis
+resid.gr.seq <- gr %>% split(mcols(.)$rbp_category) %>% get_sequence(human.genome, score_column = "residuals")
+
+#Run AME -if you want to run the code uncomment the next two lines
+ame_all <- resid.gr.seq %>% runAme(database = meme_db_new, silent = FALSE, method = "fisher", poslist = "fasta", control = NA, fasta_threshold = 0) %>% dplyr::bind_rows(.id = "rbp_category")
+
+#Save AME results
+saveRDS(ame_all, paste("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/2_293T_reclip/4_ReCLIPvsCLIP/noUV_all_max2/AME_all_Reclip_", width,".rds", sep = ""))
+return(list(results = ame_all, gr = gr))
+}
+
+#It takes around 2h to complete the following steps
+# ame_3p <- ame_analysis(resid.gr, upstream = 0, downstream = 225, "3p_250")
+# ame_5p <- ame_analysis(resid.gr, upstream = 225, downstream = 0, "5p_250")
+```
+
+```{r message=FALSE, warning=FALSE, fig.height=15, fig.width=10}
+#Read RDS
+ame_all1 <- readRDS("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/2_293T_reclip/4_ReCLIPvsCLIP/noUV_all_max2/AME_all_Reclip_3p_250.rds")
+ame_all2 <- readRDS("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/2_293T_reclip/4_ReCLIPvsCLIP/noUV_all_max2/AME_all_Reclip_5p_250.rds")
+ame_all <- rbind(ame_all1, ame_all2)
+ame_all$motif_alt_id[ame_all$motif_alt_id == "HuR"] <- "ELAVL1"
+
+ame_heatmap <- function(ame) {
+#Create heatmap of AME results
+levels <- c("ELAVL1_ReCLIP", "ELAVL1_IgG", "KHSRP_ReCLIP", "KHSRP_IgG", "HNRNPM_ReCLIP", "HNRNPM_IgG")
+ame$rbp_category <- factor(ame$rbp_category, levels = levels)
+
+heatmap_mat <- ame %>%  dplyr::group_by(rbp_category, motif_alt_id, consensus) %>% mutate(evalue = -log10(evalue)) %>% dplyr::filter(evalue == max(evalue), motif_alt_id != "NA")
+heatmap_mat$motif_gene <- paste(heatmap_mat$motif_alt_id, heatmap_mat$consensus, sep = "_")
+heatmap_mat$rbp <-  sapply(strsplit(as.character(heatmap_mat$rbp_category), "_"), function(x) x[1])
+heatmap_mat2 <-  heatmap_mat %>% dplyr::group_by(rbp, motif_gene) %>% dplyr::summarise_at(vars(evalue), list(evalue = mean))
+heatmap_mat2$protID <- sapply(strsplit(as.character(heatmap_mat2$motif_gene), "_"), function(x) x[1])
+heatmap_mat3 <- heatmap_mat2 %>% dplyr::group_by(rbp, protID) %>% dplyr::filter(evalue == max(evalue))
+heatmap_mat <- heatmap_mat %>%  dplyr::group_by(rbp_category, motif_alt_id) %>%  dplyr::filter(motif_gene %in% heatmap_mat3$motif_gene) %>% dplyr::filter(evalue == max(evalue)) 
+heatmap_mat4 <- heatmap_mat %>% dplyr::select(rbp_category, motif_alt_id, evalue) %>% unique() %>% pivot_wider(names_from = motif_alt_id, values_from = evalue)
+
+heatmap_hm <- as.matrix(heatmap_mat4[-1])
+rownames(heatmap_hm) <- heatmap_mat4$rbp_category
+heatmap_hm <- heatmap_hm[match(levels(heatmap_mat4$rbp_category), rownames(heatmap_hm)),]
+return(list(hm = heatmap_hm, mat = heatmap_mat))
+}
+
+ame_res <- ame_heatmap(ame_all)
+Reclip_ame <- ame_res$hm
+
+rows_to_check <- c(1, 3, 5)
+na_counts <- colSums(is.na(Reclip_ame[rows_to_check, ]))
+columns_to_keep <- na_counts != 3
+Reclip_ame <- Reclip_ame[, columns_to_keep, drop = FALSE]
+
+Reclip_ame[is.na(Reclip_ame)] <- 0
+Reclip_ame <- rbind(Reclip_ame, ColMeans = colMeans(Reclip_ame[c(1,3,5),]))
+
+Reclip_ame <- Reclip_ame[, order(Reclip_ame[7, ], decreasing = TRUE)]
+
+#Annotation with irCLIP-RNP
+HNRNPC.irCLIP_RNP <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/Bulk_analysis/2_UVC_enriched/HNRNPC_HEK293T_clipper_results.txt", header = TRUE)
+HNRNPC.irCLIP_RNP <- subset(HNRNPC.irCLIP_RNP, FDR < 0.1)
+HNRNPM.irCLIP_RNP <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/Bulk_analysis/2_UVC_enriched/HNRNPM_HEK293T_clipper_results.txt", header = TRUE)
+HNRNPM.irCLIP_RNP <- subset(HNRNPM.irCLIP_RNP, FDR < 0.1)
+HNRNPC_RDAPs <- c(rownames(HNRNPC.irCLIP_RNP))
+HNRNPM_RDAPs <- c(rownames(HNRNPM.irCLIP_RNP))
+
+Reclip_ame.cl <- as.data.frame(t(Reclip_ame))
+Reclip_ame.cl$gene_name <- rownames(Reclip_ame.cl)
+
+Reclip_ame.cl$gene_name <- factor(Reclip_ame.cl$gene_name, levels = rev(colnames(Reclip_ame)))
+
+cleaveland_plot <- function(cl) {
+  colnames(cl) <- c("Re_CLIP", "IgG", "gene_name")
+  plot <- ggplot(cl) +
+    geom_segment( aes(x=gene_name, xend=gene_name, y=Re_CLIP, yend=IgG), color="black") +
+    geom_point( aes(x=gene_name, y=Re_CLIP), color="red", size=3 ) +
+    geom_point( aes(x=gene_name, y=IgG), color="grey", size=3 ) +
+    coord_flip()+
+    theme_bw() +
+    theme(panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(), 
+          axis.line = element_blank(),
+          plot.title = element_text(hjust = 0.5))+
+    theme(
+      legend.position = "none",
+    ) +
+    xlab("") +
+    ylab("E-value")
+  return(plot)
+}
+
+ELAVL1_cl_plot <- cleaveland_plot(Reclip_ame.cl %>% dplyr::select(ELAVL1_ReCLIP, ELAVL1_IgG, gene_name))
+KHSRP_cl_plot <- cleaveland_plot(Reclip_ame.cl %>% dplyr::select(KHSRP_ReCLIP, KHSRP_IgG, gene_name))
+HNRNPM_cl_plot <- cleaveland_plot(Reclip_ame.cl %>% dplyr::select(HNRNPM_ReCLIP, HNRNPM_IgG, gene_name))
+
+ggarrange(ELAVL1_cl_plot, KHSRP_cl_plot, HNRNPM_cl_plot,   ncol = 3)
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/2_293T_reclip/4_ReCLIPvsCLIP/noUV_all_max2/Cleaveland_plot_motifs.pdf", width = 10, height = 15)
+ggarrange(ELAVL1_cl_plot, KHSRP_cl_plot, HNRNPM_cl_plot,   ncol = 3)
+dev.off()
+```
+
+```{r message=FALSE, warning=FALSE, fig.height=3, fig.width=6}
+HNRNPC_log2FC_data <- HNRNPC.irCLIP_RNP
+HNRNPC_log2FC_data$motif <-  rownames(HNRNPC_log2FC_data) %in% colnames(Reclip_ame)
+HNRNPC_log2FC_data$rbp <- "HNRNPC"
+HNRNPC_log2FC_data <- subset(HNRNPC_log2FC_data, !(rownames(HNRNPC_log2FC_data) %in% c("HNRNPC", "ELAVL1", "HNRNPM", "KHSRP")))
+  
+HNRNPM_log2FC_data <- HNRNPM.irCLIP_RNP
+HNRNPM_log2FC_data$motif <-  rownames(HNRNPM_log2FC_data) %in% colnames(Reclip_ame)
+HNRNPM_log2FC_data$rbp <- "HNRNPM"
+HNRNPM_log2FC_data <- subset(HNRNPM_log2FC_data, !(rownames(HNRNPM_log2FC_data) %in% c("HNRNPC", "ELAVL1", "HNRNPM", "KHSRP")))
+
+HNRNP_log2FC_data <- rbind(HNRNPC_log2FC_data %>% dplyr::select(FDR:rbp), HNRNPM_log2FC_data %>% dplyr::select(FDR:rbp))
+
+
+cdf <- ggplot(data=HNRNP_log2FC_data, aes(x=logFC, group=motif, colour=motif)) +
+  stat_ecdf() +
+  scale_color_manual(values = c("FALSE" = "grey", "TRUE" = "red")) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_blank(),
+        plot.title = element_text(hjust = 0.5)) + facet_grid(cols=vars(rbp))+
+  xlab("irCLIP-RNP log2FC against no-UV") +
+  ylab("Cumulative fraction")
+
+cdf
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/2_293T_reclip/4_ReCLIPvsCLIP/noUV_all_max2/CDF_motifs_intensity_plot.pdf", width = 6, height = 3)
+cdf
+dev.off()
+```
+
+```{r message=FALSE, warning=FALSE}
+ks.test(HNRNP_log2FC_data$logFC[HNRNP_log2FC_data$motif == "FALSE" & HNRNP_log2FC_data$rbp == "HNRNPC"], HNRNP_log2FC_data$logFC[HNRNP_log2FC_data$motif == "TRUE" & HNRNP_log2FC_data$rbp == "HNRNPC"] , alternative = 'greater')[["p.value"]]
+
+ks.test(HNRNP_log2FC_data$logFC[HNRNP_log2FC_data$motif == "FALSE" & HNRNP_log2FC_data$rbp == "HNRNPM"], HNRNP_log2FC_data$logFC[HNRNP_log2FC_data$motif == "TRUE" & HNRNP_log2FC_data$rbp == "HNRNPM"] , alternative = 'greater')[["p.value"]]
+```
+
+```{r message=FALSE, warning=FALSE, fig.height=5, fig.width=20}
+# Heatmap color range
+my.breaks <- c(seq(0, 25, by=0.01))
+my.colors <- c("white", rev(paletteer_c("grDevices::YlGnBu" , length(my.breaks)-1)))
+
+annotation_col <- data.frame(HNRNPC_M_RDAPs = paste(colnames(Reclip_ame) %in% HNRNPC_RDAPs, colnames(Reclip_ame) %in% HNRNPM_RDAPs, sep = "_"))
+annotation_col$HNRNPC_M_RDAPs <- factor(annotation_col$HNRNPC_M_RDAPs)
+levels(annotation_col$HNRNPC_M_RDAPs) <- c("none", "HNRNPM_only", "HNRNPC_only", "Both")
+rownames(annotation_col) <- colnames(Reclip_ame)
+
+Reclip_ame2 <- Reclip_ame[,colnames(Reclip_ame) %in% rownames(annotation_col)[annotation_col$HNRNPC_M_RDAPs != "none"]]
+annotation_col2 <- subset(annotation_col, HNRNPC_M_RDAPs != "none")
+
+Reclip_ame2[Reclip_ame2 == 0] <- NA
+
+#Heatmap
+heatmap_ame2 <- pheatmap(
+  mat               = Reclip_ame2[-7,],
+  border_color = "black",
+  annotation_col = annotation_col2,
+  clustering_method = "complete",
+  cellwidth = 6,
+  cellheight = 12,
+  fontsize_number=5.5,
+  color = my.colors,
+  breaks = my.breaks,
+  show_colnames     = TRUE,
+  show_rownames     = TRUE,
+  drop_levels       = TRUE,
+  fontsize          = 5.5,
+  cluster_rows      = FALSE,
+  cluster_cols      = FALSE,
+  gaps_row = c(2,4),
+  na_col = "lightgrey"
+)
+
+heatmap_ame2
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/2_293T_reclip/4_ReCLIPvsCLIP/noUV_all_max2/Heatmap_motifs_features_plot_RDAPs.pdf", width = 20, height = 5)
+heatmap_ame2
+dev.off()
+```
+
+All the visualizations were saved as pdf and modified in illustrator.
+
+```{r}
+sessionInfo()
+```
+
+
+
