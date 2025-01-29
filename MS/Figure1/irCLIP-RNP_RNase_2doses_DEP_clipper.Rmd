@@ -1,0 +1,704 @@
+---
+title: "irCLIP-RNP dataset to compare 1U/µL vs 0.02U/µL RNase I digestions"
+author: "Luca Ducoli"
+output:
+  pdf_document: 
+    latex_engine: xelatex
+    pandoc_args: --listings
+    includes:
+      in_header: preamble.tex
+  html_document:
+    df_print: paged
+---
+
+This is the pipeline used to analyze the irCLIP-RNP datasets after digestion with two different RNase doses (1U/µL and 0.02U/µL), named here as "high": 1U/µL and "low": 0.02U/µL. Gel sections ranging from 70 to 350KDa (a.k.a "whole RNP zone") were subjected to MS. The experiment was performed in HEK293T cells.
+
+# 1. Prepare the dataset
+```{r, message=FALSE, warning=FALSE}
+#Load the libraries
+library(formatR)
+library(DEP2)
+library(tidyverse)
+library(ggpubr)
+library(Clipper)
+library(viridis)
+library(patchwork)
+library(hrbrthemes)
+library(igraph)
+library(ggraph)
+library(colormap)
+library(UpSetR)
+library(ggplot2)
+library(arcdiagram)
+library(pheatmap)
+library(grid)
+library(DESeq2)
+library(data.table)
+library(eulerr)
+library(SuperExactTest)
+```
+
+In the first step, we prepared the dataset to create a SummarizedExperiment object starting from the proteinGroups.txt output file from MaxQuant.
+```{r warning=FALSE, message=FALSE, tidy=TRUE, tidy.opts=list(width.cutoff=60)}
+#Open proteinGroups.txt results from MaxQuant
+data <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/RNase_HighLow_293T/0_Data/proteinGroups.txt")
+
+#Remove RPL proteins
+data <- data[-grep("RPL", data$Gene.names),]
+
+#Generate unique names and ids
+unique_pg <- make_unique(data, name = "Gene.names", ids = "Protein.IDs")
+unique_pg <- unique_pg %>% arrange(name)
+
+#Get the LFQ intensity
+ecols <- grep("LFQ.intensity.", colnames(unique_pg))
+
+#Keep isoform with higher LFQ intensity
+iso <- grep("\\.\\d+$", unique_pg$name)
+rbp <- gsub("\\.1", "", c(unique_pg$name[iso]))
+
+#Find original row name of the isoform with higher intensity
+find_max_value <- function(rbp) {
+  filtered_df <- unique_pg[unique_pg$name %like% rbp, grep("LFQ.intensity.", colnames(unique_pg)) ]
+  filtered_df$rowSums <- rowSums(filtered_df[, grep("LFQ.intensity.", colnames(filtered_df))])
+  max_value <- which.max(filtered_df$rowSums)
+  rownames <- rownames(filtered_df)[-max_value]
+  return(rownames)
+}
+max_iso <- c(unlist(lapply(rbp, find_max_value)))
+
+#Remove low intensity isoforms
+unique_pg <- unique_pg[!(rownames(unique_pg) %in% max_iso),]
+
+head(unique_pg, n = 2)
+```
+
+# 2. Create a SummarizedExperiment
+We used the following design to create a SummarizedExperiment.
+```{r warning=FALSE, message=FALSE}
+#Load design matrix
+design <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/RNase_HighLow_293T/0_Data/Design_matrix.txt")
+design
+```
+
+```{r warning=FALSE, message=FALSE}
+#Create a SummarizedExperiment
+se <- make_se(unique_pg, columns = ecols, expdesign = design)
+
+#Subset the SummarizedExperiment according to the proteins
+HNRNPC_se <- se[,se$rbp == "HNRNPC" ]
+HNRNPU_se <- se[,se$rbp == "HNRNPU" ]
+HNRNPA2B1_se <- se[,se$rbp == "HNRNPA2B1" ]
+
+#Remove noUV samples for comparing the two RNase doses
+HNRNPC_se_flt2 <- HNRNPC_se[,HNRNPC_se$crosslinking != "noUV" ]
+HNRNPU_se_flt2 <- HNRNPU_se[,HNRNPU_se$crosslinking != "noUV" ]
+HNRNPA2B1_se_flt2 <- HNRNPA2B1_se[,HNRNPA2B1_se$crosslinking != "noUV" ]
+```
+
+# 3. Perform enrichment analysis using DEP
+Here, we performed enrichment analysis by comparing the RNase high vs RNase low using the DEP2 R package (PMID: 37624922).
+```{r message=FALSE, warning=FALSE}
+set.seed(3)
+#Function to calculate the differential expression
+DEP_analysis <- function(se, a) {
+  filt <- filter_se(se,thr = 0, filter_formula = ~ Reverse != '+' & Potential.contaminant !="+" & Peptides > 1 & Unique.peptides > 0)
+  norm <- normalize_vsn(filt)
+  imputed <- DEP2::impute(norm,fun = "QRILC")
+  diff <- test_diff(imputed, type = "control", control = a, fdr.type = "BH")
+  dep <- add_rejections(diff, alpha = 1, lfc = 0)
+  results <- get_results(dep)
+  return(list(se = se, filt = filt, 
+              norm = norm, imputed = imputed, diff = diff, dep = dep, 
+              results = results))
+}
+
+#Run DEP analysis
+HNRNPC_se_DE <- DEP_analysis(se =  HNRNPC_se_flt2,a = "HNRNPC_low")
+HNRNPU_se_DE <- DEP_analysis(se =  HNRNPU_se_flt2,a = "HNRNPU_low")
+HNRNPA2B1_se_DE <- DEP_analysis(se =  HNRNPA2B1_se_flt2,a = "HNRNPA2B1_low")
+
+head(HNRNPC_se_DE$results)
+
+#Save the LFQ intensities
+write.table(as.data.frame(HNRNPC_se_DE$dep@assays@data@listData), file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/RNase_HighLow_293T/2_DEP/HNRNPC_se_DE_LFQ_intensity.txt", row.names = TRUE, sep = "\t", quote = F)
+write.table(as.data.frame(HNRNPU_se_DE$dep@assays@data@listData), file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/RNase_HighLow_293T/2_DEP/HNRNPU_se_DE_LFQ_intensity.txt", row.names = TRUE, sep = "\t", quote = F)
+write.table(as.data.frame(HNRNPA2B1_se_DE$dep@assays@data@listData), file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/RNase_HighLow_293T/2_DEP/HNRNPA2B1_se_DE_LFQ_intensity.txt", row.names = TRUE, sep = "\t", quote = F)
+
+write.table(HNRNPC_se_DE$results, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/RNase_HighLow_293T/2_DEP/HNRNPC_se_norm_QRILC_res_LFQ_intensity.txt", row.names = FALSE, sep = "\t", quote = F)
+write.table(HNRNPU_se_DE$results, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/RNase_HighLow_293T/2_DEP/HNRNPU_se_norm_QRILC_res_LFQ_intensity.txt", row.names = FALSE, sep = "\t", quote = F)
+write.table(HNRNPA2B1_se_DE$results, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/RNase_HighLow_293T/2_DEP/HNRNPA2B1_se_norm_QRILC_res_LFQ_intensity.txt", row.names = FALSE, sep = "\t", quote = F)
+```
+Significant reduced proteins were selected as proteins having an FDR < 0.05 and a logFC vs RNase low (0.02U/µL) dose < 0.
+
+# 4. Perform FDR analysis using Clipper
+We used Clipper (PMID:34635147) function to compare noUV (1 replicate) and UVC samples (2 replicates for each RNase dose).
+```{r message=FALSE, warning=FALSE}
+#Impute data with noUV
+HNRNPC_se_flt <- HNRNPC_se[rownames(HNRNPC_se_DE$filt)]
+write.table(as.data.frame(HNRNPC_se@assays@data@listData), file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/RNase_HighLow_293T/2_DEP/HNRNPC_se_LFQ_intensity_raw.txt", row.names = TRUE, sep = "\t", quote = F)
+HNRNPC_se_flt <- DEP2::impute(HNRNPC_se_flt,fun = "QRILC")
+HNRNPU_se_flt <- HNRNPU_se[rownames(HNRNPU_se_DE$filt)]
+write.table(as.data.frame(HNRNPU_se@assays@data@listData), file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/RNase_HighLow_293T/2_DEP/HNRNPU_se_LFQ_intensity_raw.txt", row.names = TRUE, sep = "\t", quote = F)
+HNRNPU_se_flt <- DEP2::impute(HNRNPU_se_flt,fun = "QRILC")
+HNRNPA2B1_se_flt <- HNRNPA2B1_se[rownames(HNRNPA2B1_se_DE$filt)]
+write.table(as.data.frame(HNRNPA2B1_se@assays@data@listData), file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/RNase_HighLow_293T/2_DEP/HNRNPA2B1_se_LFQ_intensity_raw.txt", row.names = TRUE, sep = "\t", quote = F)
+HNRNPA2B1_se_flt <- DEP2::impute(HNRNPA2B1_se_flt,fun = "QRILC")
+
+#Prepare data for clipper
+HNRNPC_data <- as.data.frame(HNRNPC_se_flt@assays@data@listData)
+HNRNPU_data <- as.data.frame(HNRNPU_se_flt@assays@data@listData)
+HNRNPA2B1_data <- as.data.frame(HNRNPA2B1_se_flt@assays@data@listData)
+
+#Run Clipper on low and high samples
+HNRNPC_clipper_high = Clipper(score.exp = as.matrix(HNRNPC_data[,c(2,3)]), score.back = as.matrix(HNRNPC_data[,-c(2,3,4,5)]), FDR = 0.1, analysis = "e")
+HNRNPC_clipper_low = Clipper(score.exp = as.matrix(HNRNPC_data[,c(4,5)]), score.back = as.matrix(HNRNPC_data[,-c(2,3,4,5)]), FDR = 0.1, analysis = "e")
+
+HNRNPU_clipper_high = Clipper(score.exp = as.matrix(HNRNPU_data[,c(2,3)]), score.back = as.matrix(HNRNPU_data[,-c(2,3,4,5)]), FDR = 0.1, analysis = "e")
+HNRNPU_clipper_low = Clipper(score.exp = as.matrix(HNRNPU_data[,c(4,5)]), score.back = as.matrix(HNRNPU_data[,-c(2,3,4,5)]), FDR = 0.1, analysis = "e")
+
+HNRNPA2B1_clipper_high = Clipper(score.exp = as.matrix(HNRNPA2B1_data[,c(2,3)]), score.back = as.matrix(HNRNPA2B1_data[,-c(2,3,4,5)]), FDR = 0.1, analysis = "e")
+HNRNPA2B1_clipper_low = Clipper(score.exp = as.matrix(HNRNPA2B1_data[,c(4,5)]), score.back = as.matrix(HNRNPA2B1_data[,-c(2,3,4,5)]), FDR = 0.1, analysis = "e")
+
+#Attach results to data
+HNRNPC_data$FDR_high <- HNRNPC_clipper_high$q
+HNRNPU_data$FDR_high <- HNRNPU_clipper_high$q
+HNRNPA2B1_data$FDR_high <- HNRNPA2B1_clipper_high$q
+
+HNRNPC_data$FDR_low <- HNRNPC_clipper_low$q
+HNRNPU_data$FDR_low <- HNRNPU_clipper_low$q
+HNRNPA2B1_data$FDR_low <- HNRNPA2B1_clipper_low$q
+
+#Calculate logFC
+HNRNPC_data$logFC_high <- rowMeans(HNRNPC_data[,c(2,3)])-HNRNPC_data$HNRNPC_noUV_1
+HNRNPC_data$logFC_low <- rowMeans(HNRNPC_data[,c(4,5)])-HNRNPC_data$HNRNPC_noUV_1
+
+HNRNPU_data$logFC_high <- rowMeans(HNRNPU_data[,c(2,3)])-HNRNPU_data$HNRNPU_noUV_1
+HNRNPU_data$logFC_low <- rowMeans(HNRNPU_data[,c(4,5)])-HNRNPU_data$HNRNPU_noUV_1
+
+HNRNPA2B1_data$logFC_high <- rowMeans(HNRNPA2B1_data[,c(2,3)])-HNRNPA2B1_data$HNRNPA2B1_noUV_1
+HNRNPA2B1_data$logFC_low <- rowMeans(HNRNPA2B1_data[,c(4,5)])-HNRNPA2B1_data$HNRNPA2B1_noUV_1
+
+head(HNRNPC_data)
+
+#Save the clipper results
+write.table(HNRNPC_data, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/RNase_HighLow_293T/2_DEP/HNRNPC_clipper_results.txt", row.names = TRUE, sep = "\t", quote = F)
+write.table(HNRNPU_data, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/RNase_HighLow_293T/2_DEP/HNRNPU_clipper_results.txt", row.names = TRUE, sep = "\t", quote = F)
+write.table(HNRNPA2B1_data, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/RNase_HighLow_293T/2_DEP/HNRNPA2B1_clipper_results.txt", row.names = TRUE, sep = "\t", quote = F)
+```
+
+# 5. Visualization of the results
+For the visualization, we first filter the DEP results for UVC-enriched proteins (a.k.a RDAPs). Only proteins with an FDR < 0.1 and a FC vs noUV > 3 in at least one RNase condition were categorized as RDAPs.
+```{r message=FALSE, warning=FALSE}
+#Store DEP results
+HNRNPC <- HNRNPC_se_DE$results
+HNRNPU <- HNRNPU_se_DE$results
+HNRNPA2B1 <- HNRNPA2B1_se_DE$results
+
+#Get the significant UVC-enriched proteins
+HNRNPC_data_sub <- subset(HNRNPC_data, (HNRNPC_data$logFC_low > log2(3) & HNRNPC_data$FDR_low < 0.1) | (HNRNPC_data$logFC_high > log2(3) & HNRNPC_data$FDR_high < 0.1))
+HNRNPU_data_sub <- subset(HNRNPU_data, (HNRNPU_data$logFC_low > log2(3) & HNRNPU_data$FDR_low < 0.1) | (HNRNPU_data$logFC_high > log2(3) & HNRNPU_data$FDR_high < 0.1))
+HNRNPA2B1_data_sub <- subset(HNRNPA2B1_data, (HNRNPA2B1_data$logFC_low > log2(3) & HNRNPA2B1_data$FDR_low < 0.1) | (HNRNPA2B1_data$logFC_high > log2(3) & HNRNPA2B1_data$FDR_high < 0.1))
+
+#Keep only UVC-enriched proteins
+HNRNPC <- subset(HNRNPC, HNRNPC$name %in% rownames(HNRNPC_data_sub))
+HNRNPU <- subset(HNRNPU, HNRNPU$name %in% rownames(HNRNPU_data_sub))
+HNRNPA2B1 <- subset(HNRNPA2B1, HNRNPA2B1$name %in% rownames(HNRNPA2B1_data_sub))
+
+#Determine the significant proteins
+HNRNPC$sign <- HNRNPC$HNRNPC_high_vs_HNRNPC_low_p.adj < 0.05
+HNRNPU$sign <- HNRNPU$HNRNPU_high_vs_HNRNPU_low_p.adj < 0.05
+HNRNPA2B1$sign <- HNRNPA2B1$HNRNPA2B1_high_vs_HNRNPA2B1_low_p.adj < 0.05
+
+head(HNRNPC, n = 2)
+```
+
+## Rank plot of intensities
+As a first visualization, we generated rank plots based on the imputed LFQ intensities for the RNAse low samples and highlighted the top 20 UVC-enriched proteins with the highest intensity for all the tested RBPs. Black dots: RDAPs.
+```{r fig.width = 12, fig.height = 4, message=FALSE, warning=FALSE}
+#Get the ranking of the proteins
+HNRNPC_norm <- as.data.frame(HNRNPC_se_DE$dep@assays@data@listData)
+HNRNPC_norm$name <- rownames(HNRNPC_norm)
+HNRNPC_norm$low_avg <- rowMeans(HNRNPC_norm[,3:4])
+HNRNPC_norm$UVC <- HNRNPC_norm$name %in% HNRNPC$name
+
+HNRNPU_norm <- as.data.frame(HNRNPU_se_DE$dep@assays@data@listData)
+HNRNPU_norm$name <- rownames(HNRNPU_norm)
+HNRNPU_norm$low_avg <- rowMeans(HNRNPU_norm[,3:4])
+HNRNPU_norm$UVC <- HNRNPU_norm$name %in% HNRNPU$name
+
+HNRNPA2B1_norm <- as.data.frame(HNRNPA2B1_se_DE$dep@assays@data@listData)
+HNRNPA2B1_norm$name <- rownames(HNRNPA2B1_norm)
+HNRNPA2B1_norm$low_avg <- rowMeans(HNRNPA2B1_norm[,3:4])
+HNRNPA2B1_norm$UVC <- HNRNPA2B1_norm$name %in% HNRNPA2B1$name
+
+HNRNPC_norm$Rank = rank(-HNRNPC_norm$low_avg)
+HNRNPU_norm$Rank = rank(-HNRNPU_norm$low_avg)
+HNRNPA2B1_norm$Rank = rank(-HNRNPA2B1_norm$low_avg)
+
+options(ggrepel.max.overlaps = Inf)
+
+HNRNPC_plot <- ggplot(HNRNPC_norm, aes(x=Rank, y=low_avg, label = name)) + 
+  geom_point(aes(col = UVC)) +
+  scale_color_manual(values = c(`TRUE` = "black", `FALSE` = "grey")) +
+  ggrepel::geom_text_repel(data = subset(HNRNPC_norm, Rank < 20), size = 2) +
+    theme_bw() +
+  ggtitle("HNRNPC") +
+  theme(legend.position = "none", panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_blank(),
+        plot.title = element_text(hjust = 0.5)) +
+  xlab("Rank") +
+  ylab("log2(LFQ intensity)")
+
+HNRNPU_plot <- ggplot(HNRNPU_norm, aes(x=Rank, y=low_avg, label = name)) + 
+  geom_point(aes(col = UVC)) +
+  scale_color_manual(values = c(`TRUE` = "black", `FALSE` = "grey")) +
+  ggrepel::geom_text_repel(data = subset(HNRNPU_norm, Rank < 20), size = 2) +
+    theme_bw() +
+  ggtitle("HNRNPU") +
+  theme(legend.position = "none", panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_blank(),
+        plot.title = element_text(hjust = 0.5)) +
+  xlab("Rank") +
+  ylab("log2(LFQ intensity)")
+
+HNRNPA2B1_plot <- ggplot(HNRNPA2B1_norm, aes(x=Rank, y=low_avg, label = name)) + 
+  geom_point(aes(col = UVC)) +
+  scale_color_manual(values = c(`TRUE` = "black", `FALSE` = "grey")) +
+  ggrepel::geom_text_repel(data = subset(HNRNPA2B1_norm, Rank < 20), size = 2) +
+    theme_bw() +
+  ggtitle("HNRNPA2B1") +
+  theme(legend.position = "none", panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_blank(),
+        plot.title = element_text(hjust = 0.5)) +
+  xlab("Rank") +
+  ylab("log2(LFQ intensity)")
+
+
+ggarrange(HNRNPA2B1_plot, HNRNPC_plot, HNRNPU_plot, ncol = 3)
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+#Save the plot as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/RNase_HighLow_293T/3_DEP_visualization/Rank_plot.pdf", height = 4, width = 12)
+ggarrange(HNRNPA2B1_plot, HNRNPC_plot, HNRNPU_plot, ncol = 3)
+dev.off()
+```
+
+## Volcano plots
+Next, we showed the DE results as a typical volcano plot by having the fold change on the x axis and the FDR on the y axis. Black dots: significant proteins with FDR < 0.05 between high and low RNase doses.
+```{r fig.width = 12, fig.height = 4, message=FALSE, warning=FALSE}
+#Create a volcano plot
+HNRNPC.ggplot <- ggplot(data=HNRNPC, aes(x=HNRNPC_high_vs_HNRNPC_low_ratio, y=-log10(HNRNPC_high_vs_HNRNPC_low_p.val))) + geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_point(aes(col = sign)) +
+  scale_color_manual(values = c(`TRUE` = "black", `FALSE` = "grey")) +
+    ggrepel::geom_text_repel(data = filter(HNRNPC, sign), aes(label = name), size = 2, box.padding = unit(0.1, "lines"), point.padding = unit(0.1, "lines"), segment.size = 0.5,max.overlaps = Inf) + 
+  theme_bw() +
+  ggtitle("HNRNPC") +
+  theme(legend.position = "none", panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_blank(),
+        plot.title = element_text(hjust = 0.5)) +
+  xlab("log2FC 1U/µL vs. 0.02U/µL RNase I") +
+  ylab("−log10(P-value)") +
+  xlim(-11, 11) +
+  ylim(0, 5)
+
+HNRNPU.ggplot <- ggplot(data=HNRNPU, aes(x=HNRNPU_high_vs_HNRNPU_low_ratio, y=-log10(HNRNPU_high_vs_HNRNPU_low_p.val))) + geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_point(aes(col = sign)) +
+  scale_color_manual(values = c(`TRUE` = "black", `FALSE` = "grey")) +
+    ggrepel::geom_text_repel(data = filter(HNRNPU, sign), aes(label = name), size = 2, box.padding = unit(0.1, "lines"), point.padding = unit(0.1, "lines"), segment.size = 0.5,max.overlaps = Inf) + 
+  theme_bw() +
+  ggtitle("HNRNPU") +
+  theme(legend.position = "none", panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_blank(),
+        plot.title = element_text(hjust = 0.5)) +
+  xlab("log2FC 1U/µL vs. 0.02U/µL RNase I") +
+  ylab("−log10(P-value)") +
+  xlim(-11, 11) +
+  ylim(0, 5)
+
+HNRNPA2B1.ggplot <- ggplot(data=HNRNPA2B1, aes(x=HNRNPA2B1_high_vs_HNRNPA2B1_low_ratio, y=-log10(HNRNPA2B1_high_vs_HNRNPA2B1_low_p.val))) + geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_point(aes(col = sign)) +
+  scale_color_manual(values = c(`TRUE` = "black", `FALSE` = "grey")) +
+  ggrepel::geom_text_repel(data = filter(HNRNPA2B1, sign), aes(label = name), size = 2, box.padding = unit(0.1, "lines"), point.padding = unit(0.1, "lines"), segment.size = 0.5,max.overlaps = Inf) + 
+  theme_bw() +
+  ggtitle("HNRNPA2B1") +
+  theme(legend.position = "none", panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_blank(),
+        plot.title = element_text(hjust = 0.5)) +
+  xlab("log2FC 1U/µL vs. 0.02U/µL RNase I") +
+  ylab("−log10(P-value)") +
+  xlim(-11, 11) +
+  ylim(0, 5)
+
+ggarrange(HNRNPA2B1.ggplot, HNRNPC.ggplot, HNRNPU.ggplot, ncol = 3)
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+#Save the plot as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/RNase_HighLow_293T/3_DEP_visualization/Volcano_plot.pdf", height = 4, width = 12)
+ggarrange(HNRNPA2B1.ggplot, HNRNPC.ggplot, HNRNPU.ggplot, ncol = 3)
+dev.off()
+```
+
+## Upset plot
+Here, we compared the overlap of the RDAPs with significant reduction after 1U/µL between the RBP tested using upset plot.
+```{r fig.show='hide', message= FALSE, warning=FALSE}
+#Subset significant proteins
+HNRNPC_flt <- subset(HNRNPC, HNRNPC_high_vs_HNRNPC_low_p.adj < 0.05 & HNRNPC_high_vs_HNRNPC_low_ratio < 0)
+HNRNPA2B1_flt <- subset(HNRNPA2B1, HNRNPA2B1_high_vs_HNRNPA2B1_low_p.adj < 0.05 & HNRNPA2B1_high_vs_HNRNPA2B1_low_ratio < 0)
+HNRNPU_flt <- subset(HNRNPU, HNRNPU_high_vs_HNRNPU_low_p.adj < 0.05 & HNRNPU_high_vs_HNRNPU_low_ratio < 0)
+
+#Make upset plot of detected proteins in noUV samples
+lt.tsk = list(HNRNPC = HNRNPC_flt$name,
+              HNRNPU = HNRNPU_flt$name,
+              HNRNPA2B1 = HNRNPA2B1_flt$name)
+
+upsetPlot <- upset(fromList(lt.tsk),
+      sets = c("HNRNPU","HNRNPC","HNRNPA2B1"),
+      mb.ratio = c(0.8, 0.2),
+      number.angles = 0,
+      text.scale = 1,
+      point.size = 3, 
+      line.size = 1,
+      keep.order = TRUE, 
+      # empty.intersections = "on"
+      # queries = list(list(query = intersects, params = list("tss.total"), color = "red", active = T))
+)
+```
+
+```{r message=FALSE, warning=FALSE, fig.width = 5, fig.height = 4}
+upsetPlot
+```
+
+```{r message = FALSE, warning=FALSE, results='hide'}
+#Save the upsetplot as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/RNase_HighLow_293T/3_DEP_visualization/Upsetplot_signprot.pdf", width = 3.5, height = 5)
+upsetPlot
+dev.off()
+```
+
+## Arc diagram
+We then used these information to generated a binary table of the interaction that we will use for generating the arc diagram.
+```{r message=FALSE, warning=FALSE}
+#Function to create the binary table
+fromList <- function (input) {
+  elements <- unique(unlist(input))
+  data <- unlist(lapply(input, function(x) {
+    x <- as.vector(match(elements, x))
+  }))
+  data[is.na(data)] <- as.integer(0)
+  data[data != 0] <- as.integer(1)
+  data <- data.frame(matrix(data, ncol = length(input), byrow = F))
+  data <- data[which(rowSums(data) != 0), ]
+  names(data) <- names(input)
+  row.names(data) <- elements
+  return(data)
+}
+
+#Binary table with colnames:
+sign.proteins <- fromList(lt.tsk)
+write.table(sign.proteins, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/RNase_HighLow_293T/3_DEP_visualization/Upsetplot_signprot.txt", row.names = TRUE, sep = "\t", quote = F)
+
+head(sign.proteins)
+```
+
+```{r, fig.width = 12, fig.height = 8, message=FALSE, warning=FALSE}
+#Prepare data
+data_int <- data.frame(to = c(HNRNPC_flt$name, HNRNPU_flt$name, HNRNPA2B1_flt$name), 
+                       ratio = c(HNRNPC_flt$HNRNPC_high_vs_HNRNPC_low_ratio, HNRNPU_flt$HNRNPU_high_vs_HNRNPU_low_ratio, HNRNPA2B1_flt$HNRNPA2B1_high_vs_HNRNPA2B1_low_ratio))
+data_int$from <- c(rep("HNRNPC", length(HNRNPC_flt$name)), rep("HNRNPU", length(HNRNPU_flt$name)), rep("HNRNPA2B1", length(HNRNPA2B1_flt$name)))
+connect <- data_int[,c(3,1:2)]
+connect <- connect %>% group_by(from) %>% arrange(ratio, .by_group=TRUE)
+
+mygraph <- graph_from_data_frame( connect, directed = FALSE )
+
+#Number of connection per RBP
+c( as.character(connect$from), as.character(connect$to)) %>%
+  as.tibble() %>%
+  group_by(value) %>%
+  summarize(n=n()) -> coauth
+colnames(coauth) <- c("name", "n")
+
+#Add grouping
+coauth2 <- coauth[order(coauth$n, decreasing = TRUE),]
+coauth2$grp <- c( rep(1, 3), rep( 4 , length(coauth2$n[coauth2$n == 3])), rep( 3 , length(coauth2$n[coauth2$n == 2])), rep( 2 , length(coauth2$n[coauth2$n == 1])))
+coauth3 <- coauth2[order(coauth2$grp, decreasing = FALSE),]
+
+#Generate a arcplot compatible object
+star_edges = get.edgelist(mygraph)
+
+#Load BioGRID interactions
+biogrid <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/RNase_HighLow_293T/0_Data/BIOGRID/RBP_biogrid_interactors.txt",sep="\t", header=TRUE)
+biogrid <- data.frame("a" = biogrid$Official.Symbol.Interactor.A, "b" = biogrid$Official.Symbol.Interactor.B)
+
+#Compare the signifcant proteins to BioGrid annotation
+hnC <- biogrid == "HNRNPC"
+hnC <- data.frame("a"=biogrid$a,"b"=biogrid$b,"c"=paste(hnC[,1],hnC[,2], sep="_"))
+hnC.1 <- subset(hnC, c == "TRUE_FALSE")
+hnC.2 <- subset(hnC, c == "FALSE_TRUE")
+hnC <- rbind(hnC.1,hnC.2)
+hnC.a <- HNRNPC_flt$name %in% hnC$a
+hnC.b <- HNRNPC_flt$name %in% hnC$b
+hnC.int <- data.frame("gene" = HNRNPC_flt$name,"biogrid" = paste(hnC.a,hnC.b, sep = "_"))
+hnC.int$rbp <- "HNRNPC"
+
+hna2b1 <- biogrid == "HNRNPA2B1"
+hna2b1 <- data.frame("a"=biogrid$a,"b"=biogrid$b,"c"=paste(hna2b1[,1],hna2b1[,2], sep="_"))
+hna2b1.1 <- subset(hna2b1, c == "TRUE_FALSE")
+hna2b1.2 <- subset(hna2b1, c == "FALSE_TRUE")
+hna2b1 <- rbind(hna2b1.1,hna2b1.2)
+hna2b1.a <- HNRNPA2B1_flt$name %in% hna2b1$a
+hna2b1.b <- HNRNPA2B1_flt$name %in% hna2b1$b
+hna2b1.int <- data.frame("gene" = HNRNPA2B1_flt$name,"biogrid" = paste(hna2b1.a,hna2b1.b, sep = "_"))
+hna2b1.int$rbp <- "HNRNPA2B1"
+
+hnU <- biogrid == "HNRNPU"
+hnU <- data.frame("a"=biogrid$a,"b"=biogrid$b,"c"=paste(hnU[,1],hnU[,2], sep="_"))
+hnU.1 <- subset(hnU, c == "TRUE_FALSE")
+hnU.2 <- subset(hnU, c == "FALSE_TRUE")
+hnU <- rbind(hnU.1,hnU.2)
+hnU.a <- HNRNPU_flt$name %in% hnU$a
+hnU.b <- HNRNPU_flt$name %in% hnU$b
+hnU.int <- data.frame("gene" = HNRNPU_flt$name,"biogrid" = paste(hnU.a,hnU.b, sep = "_"))
+hnU.int$rbp <- "HNRNPU"
+
+#Combine the BioGRID results and prepare data for arcplot
+all <- rbind(hnC.int,hna2b1.int,hnU.int)
+write.table(all, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/RNase_HighLow_293T/3_DEP_visualization/RNaseHL_BioGRID_interactions.txt", sep = "\t", row.names = FALSE, quote = F)
+
+all$int <- paste(all$gene, all$rbp, sep = "_")
+edges <- as.data.frame(star_edges)
+edges$int <- paste(edges$V2, edges$V1, sep = "_")
+all$int[grep("HNRNPA2B1_HNRNPC", all$int)] <- "HNRNPC_HNRNPA2B1"
+
+idx <- match(all$int, edges$int)
+
+all <- all[match(edges$int, all$int),]
+all$color <- ifelse(all$biogrid == "FALSE_FALSE", "orange", "black")
+
+#Do the arcplot
+arcplot(star_edges, show.nodes = TRUE, show.labels = TRUE, ordering=coauth3$name[c(3,2,1,4:length(coauth3$name))],
+        lwd.arcs=(connect$ratio*-1)/1.5, col.arcs=all$color,
+        col.nodes = "#006633", cex.nodes=2, line=-0.5,col.labels = "black", ylim = c(-0.5,0.5), above = c(1:length(HNRNPA2B1_flt$name),(length(HNRNPA2B1_flt$name)+length(HNRNPC_flt$name)+1):length(star_edges[,1])))
+```
+Nodes: significant proteins; edges: significant reduced association with bait; edge width: logFC after DEP analysis; orange edge: novel putative associations.
+
+```{r message = FALSE, warning=FALSE, results='hide'}
+#Save the arc plot as PDF
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/RNase_HighLow_293T/3_DEP_visualization/Arcplot_signprot.pdf", width = 10, height = 5)
+arcplot(star_edges, show.nodes = TRUE, show.labels = TRUE, ordering=coauth3$name[c(1,3,2,4:length(coauth3$name))],
+        lwd.arcs=(connect$ratio*-1)/1.5, col.arcs=all$color,
+        col.nodes = "#006633", cex.nodes=2, line=-0.5,col.labels = "black", ylim = c(-0.5,0.5), above = c(1:length(HNRNPA2B1_flt$name),(length(HNRNPA2B1_flt$name)+length(HNRNPC_flt$name)+1):length(star_edges[,1])))
+dev.off()
+```
+
+## Heatmap
+We also generated heatmap of imputed LFQ intensities for the RDAPs significantly reduced in at least one RBP tested.
+```{r}
+#Load results from imputed LFQ intensities used in DEP analysis
+HNRNPC_LFQ <- as.data.frame(HNRNPC_se_DE$dep@assays@data@listData)
+HNRNPU_LFQ <- as.data.frame(HNRNPU_se_DE$dep@assays@data@listData)
+HNRNPA2B1_LFQ <- as.data.frame(HNRNPA2B1_se_DE$dep@assays@data@listData)
+
+head(HNRNPC_LFQ)
+```
+
+```{r, message = FALSE, warning=FALSE, fig.width = 5, fig.height = 7}
+#Get the significant proteins
+sign_prot <- unique(c(HNRNPC_flt$name, HNRNPU_flt$name, HNRNPA2B1_flt$name))
+
+rbp_fc <- merge(HNRNPC_flt[,c(1,7)], HNRNPU_flt[,c(1,7)], by = "name", all.x =TRUE, all.y = TRUE)
+rbp_fc <- merge(rbp_fc, HNRNPA2B1_flt[,c(1,7)], by = "name", all.x =TRUE, all.y = TRUE)
+rbp_fc <- rbp_fc %>% replace(is.na(.), 0)
+rbp_fc$avglogfc <- rowMeans(rbp_fc[,2:4])
+
+
+#Merge the LFQ intensities of RBP tested
+all.LFQ <- merge(HNRNPA2B1_LFQ[,c(3,4,1,2)], HNRNPC_LFQ[,c(3,4,1,2)], by = "row.names", all = TRUE)
+rownames(all.LFQ) <- all.LFQ$Row.names
+all.LFQ <- merge(all.LFQ[-1], HNRNPU_LFQ[,c(3,4,1,2)], by = "row.names", all = TRUE)
+rownames(all.LFQ) <- all.LFQ$Row.names
+all.LFQ <- all.LFQ[-1]
+all.LFQ <- all.LFQ[sign_prot,]
+
+#Color scale to be used in the pheatmap
+my.breaks <- c(seq(-1, -0.01, by=0.1), seq(0.1, 1, by=0.1)) 
+my.colors <- c(colorRampPalette(colors = c("#2166AC", "#4393C3", "#92C5DE", "#D1E5F0", "#F7F7F7"))(length(my.breaks)/2), colorRampPalette(colors = c("#F7F7F7", "#FDDBC7", "#F4A582", "#D6604D", "#B2182B"))(length(my.breaks)/2))
+
+#Annotation about significance
+annotation <- as.data.frame(sign.proteins)
+annotation$name <- rownames(annotation)
+annotation <- merge(annotation, rbp_fc[,c(1,5)], by = "name")
+rownames(annotation) <- annotation$name
+annotation <- annotation[,c(3,2,4,5)]
+annotation <- annotation %>% arrange(-HNRNPA2B1, -HNRNPC, -HNRNPU, avglogfc)
+annotation[annotation == 1] <- "Yes"
+annotation[annotation == 0] <- "No"
+annotation$HNRNPU <- as.factor(annotation$HNRNPU)
+annotation$HNRNPC <- as.factor(annotation$HNRNPC)
+annotation$HNRNPA2B1 <- as.factor(annotation$HNRNPA2B1)
+annotation <- annotation[,-c(4)]
+colnames(annotation) <- c("HNRNPU_sign", "HNRNPC_sign", "HNRNPA2B1_sign")
+
+ann_colors = list(HNRNPU_sign = c("Yes"="darkgreen", "No"="white"), HNRNPC_sign = c("Yes"="orange", "No"="white"), HNRNPA2B1_sign = c("Yes"="darkblue", "No"="white"))
+
+all <- all.LFQ[match(rownames(annotation), rownames(all.LFQ)),]
+
+#Generate the heatmap
+pheatmap <- pheatmap(
+  mat               = all,
+  annotation_row = annotation,
+  annotation_colors = ann_colors,
+  cellheight=10,
+  cellwidth = 10,
+  na_col = "grey",
+  color = my.colors,
+  breaks = my.breaks,
+  show_colnames     = TRUE,
+  show_rownames     = TRUE,
+  drop_levels       = TRUE,
+  fontsize          = 5.5,
+  cluster_rows      = FALSE,
+  cluster_cols      = FALSE,
+  scale             = "row",
+  gaps_col = c(4,8)
+)
+```
+
+```{r message = FALSE, warning=FALSE}
+#Save the heatmap
+pheatmap <- pheatmap(
+  mat               = all,
+  annotation_row = annotation,
+  annotation_colors = ann_colors,
+  cellheight=5,
+  cellwidth = 5,
+  na_col = "grey",
+  color = my.colors,
+  breaks = my.breaks,
+  show_colnames     = TRUE,
+  show_rownames     = TRUE,
+  drop_levels       = TRUE,
+  fontsize          = 5.5,
+  cluster_rows      = FALSE,
+  cluster_cols      = FALSE,
+  scale             = "row",
+  gaps_col = c(4,8),
+  filename = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/RNase_HighLow_293T/3_DEP_visualization/all_heatmap_LFQ.pdf",
+  width = 5,
+  height = 5
+)
+```
+
+# 6. Integration of species-mixing irCLIP-RNP
+We analyze the proportion of mouse and human peptides mapped to HNRNPC and HNRNPA2B1 RDAPs in the reciprocal species-mixing irCLIP-RNP datasets.
+```{r message=FALSE, warning=FALSE}
+pe <- readRDS("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/irCLIP-RNP_control/1_Species_mixing/Speciesmixing_summarized_exp.rds")
+#Prepare data.frame
+unique_pep <- 2^assay(pe[[2]])
+unique_pep <- as.data.frame(unique_pep)
+rownames(unique_pep) <- pe[[2]]@elementMetadata$name
+
+#Average between samples
+unique_pep$HNRNPC_low <- rowMeans(unique_pep[c(1,3)])
+unique_pep$HNRNPC_high <- rowMeans(unique_pep[c(2,4)])
+unique_pep$HNRNPA2B1_low <- rowMeans(unique_pep[c(5,7)])
+unique_pep$HNRNPA2B1_high <- rowMeans(unique_pep[c(6,8)])
+unique_pep$gene <-  factor(sapply(strsplit(rownames(unique_pep), "_"), function(x) x[1]))
+unique_pep$gene_uppercase <- toupper(unique_pep$gene)
+
+#Save the clipper results
+HNRNPC_RDAP <- HNRNPC_data
+HNRNPA2B1_RDAP <- HNRNPA2B1_data
+
+#Get the significant UVC-enriched proteins
+HNRNPC_data_sub <- subset(HNRNPC_RDAP, (HNRNPC_RDAP$logFC_low > log2(3) & HNRNPC_RDAP$FDR_low < 0.1) | (HNRNPC_RDAP$logFC_high > log2(3) & HNRNPC_RDAP$FDR_high < 0.1))
+HNRNPA2B1_data_sub <- subset(HNRNPA2B1_RDAP, (HNRNPA2B1_RDAP$logFC_low > log2(3) & HNRNPA2B1_RDAP$FDR_low < 0.1) | (HNRNPA2B1_RDAP$logFC_high > log2(3) & HNRNPA2B1_RDAP$FDR_high < 0.1))
+
+HNRNPC_pep <- subset(unique_pep, gene_uppercase %in% rownames(HNRNPC_data_sub))
+HNRNPA2B1_pep <- subset(unique_pep, gene_uppercase %in% rownames(HNRNPA2B1_data_sub))
+
+#Subset mouse unique peptides
+HNRNPC_mouse_unique_pep <- HNRNPC_pep[grepl("[a-z]", rownames(HNRNPC_pep)), ]
+HNRNPA2B1_mouse_unique_pep <- HNRNPA2B1_pep[grepl("[a-z]", rownames(HNRNPA2B1_pep)), ]
+
+a <- data.frame("sum" = c(sum(HNRNPC_pep$HNRNPC_low, na.rm = TRUE), 
+                          sum(HNRNPC_pep$HNRNPC_high, na.rm = TRUE),
+                          sum(HNRNPA2B1_pep$HNRNPA2B1_low, na.rm = TRUE), 
+                          sum(HNRNPA2B1_pep$HNRNPA2B1_high, na.rm = TRUE)),
+                "mouse" = c(sum(HNRNPC_mouse_unique_pep$HNRNPC_low, na.rm = TRUE), 
+                          sum(HNRNPC_mouse_unique_pep$HNRNPC_high, na.rm = TRUE),
+                          sum(HNRNPA2B1_mouse_unique_pep$HNRNPA2B1_low, na.rm = TRUE), 
+                          sum(HNRNPA2B1_mouse_unique_pep$HNRNPA2B1_high, na.rm = TRUE)))
+
+rownames(a) <- c("HNRNPC_low", "HNRNPC_high", "HNRNPA2B1_low", "HNRNPA2B1_high")
+
+a$human <- a$sum-a$mouse
+
+a$percentage_h <- 100*(a$human/a$sum)
+a$percentage_m <- 100*(a$mouse/a$sum)
+a$condition <- rownames(a)
+rownames(a) <- NULL
+
+data <- rbind(a %>% dplyr::select(human, condition) %>% dplyr::rename(value = human) %>% mutate(type = "human"),
+              a %>% dplyr::select(mouse, condition) %>% dplyr::rename(value = mouse) %>% mutate(type = "mouse"))
+data$rbp <- rep(c("HNRNPC", "HNRNPA2B1"), each = 2)
+
+plot1 <- ggplot(subset(data, rbp == "HNRNPC"), aes(fill=type, y=value, x=condition)) + 
+    geom_bar(position="stack", stat="identity") +   
+  scale_fill_manual(values = c("human" = "orange", "mouse" = "purple")) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_blank(),
+        plot.title = element_text(hjust = 0.5)) + 
+      ylab("Peptide intensity") +
+  xlab("") + ggtitle("HNRNPC RDAPs")
+
+plot2 <- ggplot(subset(data, rbp == "HNRNPA2B1"), aes(fill=type, y=value, x=condition)) + 
+    geom_bar(position="stack", stat="identity") +
+  scale_fill_manual(values = c("human" = "orange", "mouse" = "purple")) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_blank(),
+        plot.title = element_text(hjust = 0.5)) + 
+    ylab("Peptide intensity") +
+  xlab("") + ggtitle("HNRNPA2B1 RDAPs")
+
+ggarrange(plot1 + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)), plot2 + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)))
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+#Save plot as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/RNase_HighLow_293T/3_DEP_visualization/Percentage_RDAPs_MouseHuman.pdf", width = 6, height = 5)
+ggarrange(plot1, plot2)
+dev.off()
+```
+
+All the visualizations were saved as pdf and modified in illustrator.
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
