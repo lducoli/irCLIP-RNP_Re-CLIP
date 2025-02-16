@@ -1,2 +1,2 @@
-# irCLIP-RNP and ReCLIP
-This repository contains the codes used to analyze the irCLIP-RNP and Re-CLIP data included in the manuscript "irCLIP-RNP and ReCLIP reveals patterns of dynamic protein assemblies on RNA." The MS folder contains the pipelines, subdivided by main figure folders, used for analyzing and visualizing irCLIP-RNP datasets. The Seq folder contains the pipelines, subdivided by main figure folders, used for analyzing and visualizing ReCLIP and irCLIPv2 datasets.
+# irCLIP-RNP and Re-CLIP
+This repository contains the codes used to analyze the irCLIP-RNP and Re-CLIP data included in the manuscript "irCLIP-RNP and Re-CLIP reveals patterns of dynamic protein assemblies on RNA." The MS folder contains the pipelines, subdivided by main figure folders, used for analyzing and visualizing irCLIP-RNP datasets. The Seq folder contains the pipelines, subdivided by main figure folders, used for analyzing and visualizing ReCLIP and irCLIPv2 datasets.
