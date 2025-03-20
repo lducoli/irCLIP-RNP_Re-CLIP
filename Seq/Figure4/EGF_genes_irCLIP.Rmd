@@ -1,0 +1,237 @@
+---
+title: "RNA-seq analysis of time-course EGF data"
+author: "Luca Ducoli"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: 
+    latex_engine: xelatex
+    pandoc_args: --listings
+    includes:
+      in_header: preamble.tex
+---
+
+This is the pipeline used to analyze the EGF time-course RNAseq data. We collected the following time points: 0min, 15min, 30min, 60min. This experiment was done in A431 cells.
+
+# 1. Load the counts from Salmon
+```{r warning=FALSE, message=FALSE}
+#Needed libraries
+library(DESeq2)
+library(pheatmap)
+library(ggplot2)
+library(MASS)
+library(ggpubr)
+library(ggExtra)
+library(forcats)
+library(tximportData)
+library(GenomicFeatures)
+library(tximport)
+library(gprofiler2)
+library(viridis)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(eulerr)
+library(SuperExactTest)
+library(tidyverse)
+```
+
+```{r warning=FALSE, message=FALSE}
+#Prepare sample list
+dir <- "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/9_EGF_TC/1_Salmon_quant/counts"
+
+#Prepare a sample list file in Excel and store in the counts folder
+samples <- read.table("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/9_EGF_TC/1_Salmon_quant/sample_metadata.txt", header = TRUE)
+samples
+
+files <- file.path(dir, samples$run, "quant.sf")
+names(files) <- paste0(samples$sample)
+
+#Load annotation from irCLIP-RNP project
+txdb <- loadDb("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/8_DTE_analysis/0_UPF1_HNRNPC/1_DTE/Genome/gencode.v39.annotation.sqlite")
+k <- keys(txdb, keytype = "TXNAME")
+tx2gene <- AnnotationDbi::select(txdb, k, "GENEID", "TXNAME")
+
+#Import data and save counts and txi object
+txi.salmon <- tximport(files, type = "salmon", tx2gene = tx2gene)
+head(txi.salmon$counts)
+
+write.table(txi.salmon$counts, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/9_EGF_TC/1_Salmon_quant/RNA-Seq_egftc_salmon_counts_all.txt", row.names = TRUE, quote = FALSE, sep = "\t")
+saveRDS(txi.salmon, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/9_EGF_TC/1_Salmon_quant/RNA-Seq_egftc_txi_object.rds")
+```
+# 2. Differential expression analysis
+Here, we performed differential expression analysis at the gene-level using DESeq2.
+```{r message=FALSE, warning=FALSE}
+#Get sample colData
+sampleTable <- read.table("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/9_EGF_TC/1_Salmon_quant/coldata.txt", header = TRUE)
+rownames(sampleTable) <- colnames(txi.salmon$counts)
+```
+
+```{r message=FALSE, warning=FALSE}
+#Generate object
+dds <- DESeqDataSetFromTximport(txi.salmon, sampleTable, ~ condition)
+keep <- rowSums(counts(dds)) >= 1
+dds <- dds[keep,]
+
+#Generate normalized counts
+dds <- estimateSizeFactors(dds)
+normalized_counts <- counts(dds, normalized=TRUE)
+write.table(normalized_counts, file="~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/9_EGF_TC/2_Genelevel_analysis/RNA-Seq_egftc_norm_count_table.txt", sep="\t", quote=F, col.names=NA)
+
+#Run DESeq2 differential expression analysis
+dds <- DESeq(dds, test="LRT", reduced = ~ 1)
+res <- as.data.frame(results(dds))
+res15 <- as.data.frame(results(dds, name="condition_T15_vs_T0"))
+res30 <- as.data.frame(results(dds, name="condition_T30_vs_T0"))
+res60 <- as.data.frame(results(dds, name="condition_T60_vs_T0"))
+
+res <- cbind(res, logFC_T15 = res15$log2FoldChange, logFC_T30 = res30$log2FoldChange, logFC_T60 = res60$log2FoldChange)
+res$max_lfc <- pmax(res$logFC_T15,res$logFC_T30, res$logFC_T60)
+res$min_lfc <- pmin(res$logFC_T15,res$logFC_T30, res$logFC_T60)
+res$max_lfc_all <- ifelse(abs(res$max_lfc) > abs(res$min_lfc),  res$max_lfc, res$min_lfc)
+
+#Write significant results
+res$geneIDv <- rownames(res)
+res$geneID <- gsub("\\..*","",rownames(res))
+res$external_gene_name = mapIds(org.Hs.eg.db, keys=res$geneID, column="SYMBOL", keytype="ENSEMBL", multiVals="first")
+write.table(res, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/9_EGF_TC/2_Genelevel_analysis/RNA-Seq_egtc_DESeq2.txt", quote = FALSE, row.names = F, sep = "\t")
+
+res.sign <- subset(res, padj < 0.05 & abs(max_lfc_all) > 1)
+write.table(res.sign, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/9_EGF_TC/2_Genelevel_analysis/RNA-Seq_egtc_DESeq2_sign.txt", quote = FALSE, row.names = F, sep = "\t")
+
+res.sign.up <- subset(res, padj < 0.05 & max_lfc_all > 1)
+res.sign.dwn <- subset(res, padj < 0.05 & max_lfc_all < -1)
+```
+
+## Volcano plot of significant genes
+```{r message=FALSE, warning=FALSE, fig.width = 5, fig.height = 5}
+#Volcano plot
+volcano <- ggplot(data=res, aes(x=max_lfc_all, y=-log10(padj))) + 
+  geom_point(size = 0.1) +
+  geom_point(data = res.sign.up, aes(x=max_lfc_all, y = -log10(padj)), color = "red", size = 0.5) +
+  geom_point(data = res.sign.dwn, aes(x=max_lfc_all, y = -log10(padj)), color = "blue", size = 0.5) +
+  ggrepel::geom_text_repel(data = dplyr::filter(res.sign.up, external_gene_name %in% c("FOSB", "EGR1", "RND3")), aes(label = external_gene_name), size = 5, box.padding = unit(0.1, "lines"), point.padding = unit(0.1, "lines"), segment.size = 0.5) +
+  xlim(-15, 15) +
+  # ylim(-2, 5) +
+  theme_bw() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), 
+                     axis.line = element_blank(), plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position="none")
+volcano
+```
+
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+#Save the plot as pdf
+pdf("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/9_EGF_TC/2_Genelevel_analysis/RNA-Seq_egftc_Volcano_plot.pdf", height = 5, width = 5)
+volcano
+dev.off()
+```
+
+## Heatmap with RI events that are co-bound and co-regulated by HNRNPC and UPF1.
+```{r message=FALSE, warning=FALSE}
+#Heatmap with AS events
+geneAS <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/8_DTE_analysis/0_UPF1_HNRNPC/0_Overlap/HNRNPC_UPF1_RIevents.txt", header = TRUE)
+geneAS$geneIDv <- sapply(strsplit(geneAS$region, "_"), function(x) x[1])
+geneAS$geneName <- sapply(strsplit(geneAS$region, "_"), function(x) x[2])
+
+geneAScob <- read.delim("~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/Seq/4_EGF_tc/4_Visualization/2_Heatmap/HNRNPC_UPF1_cobound_genes.txt", header = TRUE)
+geneAS <- subset(geneAS, geneName %in% geneAScob$region)
+
+# Load files
+s4 <- list(EGF_TC = res.sign$geneIDv,
+           Splicing = unique(geneAS$geneIDv))
+
+# #Hypergeometric test
+n = length(unique(c(rownames(assay(dds)))))
+results <- supertest(x=s4, n=n, degree=c(1:2))
+
+# #Print P-value of interaction
+test_results <- summary(results)$Table
+write.table(test_results, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/9_EGF_TC/2_Genelevel_analysis/test_results_overlap_splicing_egf.txt", row.names = FALSE, sep = "\t", quote = F)
+
+fromList <- function (input) {
+  elements <- unique(unlist(input))
+  data <- unlist(lapply(input, function(x) {
+    x <- as.vector(match(elements, x))
+  }))
+  data[is.na(data)] <- as.integer(0)
+  data[data != 0] <- as.integer(1)
+  data <- data.frame(matrix(data, ncol = length(input), byrow = F))
+  data <- data[which(rowSums(data) != 0), ]
+  names(data) <- names(input)
+  row.names(data) <- elements
+  return(data)
+}
+
+#Up and down genes separately
+s5 <- list(EGF_TC_up = res.sign.up$geneIDv,
+           EGF_TC_dwn = res.sign.dwn$geneIDv,
+           Splicing = unique(geneAS$geneIDv))
+
+#Binary table with colnames:
+sign.AS.egf <- fromList(s5)
+sign.AS.egf$geneID <- gsub("\\..*","",rownames(sign.AS.egf)) 
+write.table(sign.AS.egf, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/9_EGF_TC/2_Genelevel_analysis/Overlap_splicing_egftc.txt", row.names = TRUE, sep = "\t", quote = F)
+```
+
+```{r message=FALSE, warning=FALSE, fig.width = 3, fig.height = 2.5}
+#Prepare the matrix for heatmap
+res.sign.egftc <- subset(res.sign, geneIDv %in%  unique(geneAS$geneIDv))
+write.table(res.sign.egftc, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/9_EGF_TC/2_Genelevel_analysis/RNA-Seq_egtc_DESeq2_sign_RI.txt", quote = FALSE, row.names = F, sep = "\t")
+mat_hm <- normalized_counts
+mat_hm <- merge(mat_hm, res.sign.egftc[,12:15], by = "row.names", sort = F)
+rownames(mat_hm) <- mat_hm$external_gene_name
+mat_hm <- as.matrix(mat_hm[,grep("EGF", colnames(mat_hm))])
+mat_hm <- log2(mat_hm+min(mat_hm[mat_hm > 0]))
+mat_hm_scaled <- scale(t(mat_hm), scale = TRUE, center = TRUE)
+
+#Annotation
+sign.AS.egf.sub <- merge(sign.AS.egf, res.sign.egftc[,12:15], by = "row.names", sort = F)
+annotation_col <- data.frame(ASDEgenes = paste(sign.AS.egf.sub$EGF_TC_up, sign.AS.egf.sub$EGF_TC_dwn, sep = "_"))
+rownames(annotation_col) <- sign.AS.egf.sub$external_gene_name
+
+my.breaks <- c(seq(-1.5, -0.025, by=0.025), seq(0.025, 1.5, by=0.025)) 
+my.colors <- c(colorRampPalette(colors = c("#2166AC", "#4393C3", "#92C5DE", "#D1E5F0", "#F7F7F7"))(length(my.breaks)/2), colorRampPalette(colors = c("#F7F7F7", "#FDDBC7", "#F4A582", "#D6604D", "#B2182B"))(length(my.breaks)/2))
+
+#Generate the heatmap
+pheatmap(mat_hm_scaled,
+  main=NA,
+  color = my.colors,
+  breaks = my.breaks,
+  annotation_col = annotation_col,
+  clustering_method = "ward.D2",
+  cluster_rows=FALSE,
+  cluster_cols = TRUE,
+  show_colnames=T, 
+  fontsize = 6.5
+)
+
+write.table(mat_hm, file = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/9_EGF_TC/2_Genelevel_analysis/RNA-Seq_egftc_heatmap_RIevents.txt", sep = "\t", row.names = TRUE, quote = F)
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+#Save the heatmap as pdf
+pheatmap(mat_hm_scaled,
+  main=NA,
+  color = my.colors,
+  breaks = my.breaks,
+  annotation_col = annotation_col,
+  clustering_method = "ward.D2",
+  cluster_rows=FALSE,
+  cluster_cols = TRUE,
+  show_colnames=T, 
+  fontsize = 6.5,
+  filename = "~/Documents/Postdoc/PD_Projects/3_irCLIP-RNP/MS/siRNA_EGF_SG/2_EGF/9_EGF_TC/2_Genelevel_analysis/RNA-Seq_egftc_heatmap_RI.pdf",
+  width = 3,
+  height = 2.5
+)
+```
+
+All the visualizations were saved as pdf and modified in illustrator.
+
+```{r}
+sessionInfo()
+```
+
+
+
